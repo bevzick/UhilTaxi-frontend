@@ -2,8 +2,8 @@ import { request } from './http'
 import { MOCK_API, mockApi } from './mock.ts'
 import type { AuthResponse, LoginRequest, RegisterRequest } from '@/types/auth'
 
-const LOGIN_URL = import.meta.env.VITE_AUTH_LOGIN_URL
-const REGISTER_URL = import.meta.env.VITE_AUTH_REGISTER_URL
+const LOGIN_URL = '/api/v1/auth/login'
+const REGISTER_URL = '/api/v1/auth/register'
 
 export const authApi = {
   login: (data: LoginRequest) =>

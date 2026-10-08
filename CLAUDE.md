@@ -34,8 +34,8 @@ Style: Prettier with no semicolons, single quotes, 100-char lines. `noUncheckedI
 
 All config comes from `VITE_*` vars in `.env` (`.env.example` is currently empty):
 
-- `VITE_API_URL` — API base URL (must be https in production builds)
-- `VITE_AUTH_LOGIN_URL`, `VITE_AUTH_REGISTER_URL` — auth endpoint *paths* appended to `VITE_API_URL` (`/api/v1/auth/...`). All other endpoints are hard-coded under `/api/v1` in `src/api/orders.ts`
+- `VITE_API_URL` — backend origin, e.g. `http://localhost:8080` (a trailing `/api/v1` is stripped, since every request path already includes it; must be https in production builds)
+All endpoint paths are hard-coded under `/api/v1` in `src/api/*.ts`.
 - `VITE_MOCK_API=true` (dev only) — replaces every API call with the in-browser fake backend in `src/api/mock.ts` (state persisted in `localStorage['uhiltaxi.mock']`). Logging in with `+380990000001` gives the driver role, `+380990000002` the admin role; any other phone is a client. Promo codes `UHIL20` / `HACK50` work. Admin changes (blocked accounts, new drivers/tariffs/promos) affect the rest of the mock
 - `VITE_GEOCODER_URL` — Nominatim-compatible geocoder base (https; http allowed only in dev)
 - `VITE_MAP_TILES_URL` — optional Leaflet tile template (defaults to OpenStreetMap; CARTO basemaps now return an "API KEY REQUIRED" watermark without a key)

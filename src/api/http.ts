@@ -8,7 +8,8 @@ function resolveBaseUrl(raw: string | undefined) {
     const url = new URL(raw ?? '')
     if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('protocol')
     if (import.meta.env.PROD && url.protocol !== 'https:') throw new Error('insecure')
-    return url.origin + url.pathname.replace(/\/+$/, '')
+    // Every request path already starts with /api/v1, so accept a base URL written either way.
+    return url.origin + url.pathname.replace(/\/+$/, '').replace(/\/api\/v1$/i, '')
   } catch {
     console.error('VITE_API_URL має бути коректною адресою http(s)')
     return ''
