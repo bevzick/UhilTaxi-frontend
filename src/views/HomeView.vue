@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, type Directive } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, type Directive } from 'vue'
 
 type Pt = [number, number]
 type Phase = 'waiting' | 'fadeIn' | 'drive' | 'arrived' | 'fadeOut'
@@ -8,6 +8,13 @@ interface Line {
   pts: Pt[]
   cum: number[]
   len: number
+}
+
+interface Route {
+  line: Line
+  d: string
+  start: Pt
+  end: Pt
 }
 
 interface Car {
@@ -35,6 +42,7 @@ const DEC = 90
 const TAXI_BRAKE = 30
 const FADE = 0.6
 const PAUSE = 1.6
+const RAD = Math.PI / 180
 
 const pt = (arr: Pt[], i: number) => arr[i] as Pt
 const num = (arr: number[], i: number) => arr[i] as number
@@ -48,8 +56,10 @@ function spline(ctrl: Pt[], steps = 14): Pt[] {
     const p3 = pt(ctrl, Math.min(i + 2, ctrl.length - 1))
     for (let k = 0; k < steps; k++) {
       const t = k / steps
+      const t2 = t * t
+      const t3 = t2 * t
       const f = (a: number, b: number, c: number, d: number) =>
-        0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (3 * b - a - 3 * c + d) * t * t * t)
+        0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - a - 3 * c + d) * t3)
       out.push([f(p0[0], p1[0], p2[0], p3[0]), f(p0[1], p1[1], p2[1], p3[1])])
     }
   }
@@ -83,7 +93,7 @@ function locate(line: Line, s: number) {
   return {
     x: a[0] + (b[0] - a[0]) * t,
     y: a[1] + (b[1] - a[1]) * t,
-    a: (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI,
+    a: Math.atan2(b[1] - a[1], b[0] - a[0]) / RAD,
   }
 }
 
@@ -174,12 +184,9 @@ const roadDefs: { id: string; width: number; ctrl: Pt[] }[] = [
   { id: 'v2', width: 18, ctrl: [[402, -30], [388, 110], [425, 220], [395, 330], [388, 450], [422, 550]] },
 ]
 
-const roads = roadDefs.map((r) => {
-  const line = markRaw(makeLine(spline(r.ctrl)))
-  return { id: r.id, width: r.width, line, d: toD(line.pts) }
-})
-
-const roadLine = (id: string) => (roads.find((r) => r.id === id) as (typeof roads)[number]).line
+const roadLines = new Map(roadDefs.map((r) => [r.id, makeLine(spline(r.ctrl))]))
+const roadLine = (id: string) => roadLines.get(id) as Line
+const roads = roadDefs.map((r) => ({ id: r.id, width: r.width, d: toD(roadLine(r.id).pts) }))
 
 const routeSpecs = [
   { roads: ['h2', 'v1', 'h1', 'v0'], start: 0.88, end: 0.28 },
@@ -187,7 +194,7 @@ const routeSpecs = [
   { roads: ['h1', 'v1', 'h0'], start: 0.12, end: 0.28 },
 ]
 
-const routes = routeSpecs.map((spec) => {
+const routes: Route[] = routeSpecs.map((spec) => {
   const legs = spec.roads.map((id, k) => {
     const line = roadLine(id)
     const from = k === 0 ? spec.start * line.len : intersect(roadLine(spec.roads[k - 1] as string), line).sb
@@ -195,7 +202,7 @@ const routes = routeSpecs.map((spec) => {
       k === spec.roads.length - 1 ? spec.end * line.len : intersect(line, roadLine(spec.roads[k + 1] as string)).sa
     return slice(line, from, to)
   })
-  const line = markRaw(makeLine(offsetPts(joinLegs(legs), LANE)))
+  const line = makeLine(offsetPts(joinLegs(legs), LANE))
   return { line, d: toD(line.pts), start: pt(line.pts, 0), end: pt(line.pts, line.pts.length - 1) }
 })
 
@@ -205,7 +212,7 @@ function laneOf(id: string, dir: 1 | -1) {
 }
 
 const makeCar = (line: Line, o: Partial<Car>): Car => ({
-  line: markRaw(line),
+  line,
   s: 0,
   v: 0,
   vmax: 40,
@@ -222,28 +229,35 @@ const makeCar = (line: Line, o: Partial<Car>): Car => ({
   ...o,
 })
 
-const state = reactive({
-  cars: [
-    makeCar(laneOf('h1', 1), { s: 60, vmax: 40, color: '#5aae80', prio: 3 }),
-    makeCar(laneOf('v2', -1), { s: 200, vmax: 36, color: '#3f9a6c', prio: 2 }),
-    makeCar(laneOf('h2', -1), { s: 300, vmax: 44, color: '#4fa274', prio: 1 }),
-    makeCar((routes[0] as (typeof routes)[number]).line, {
-      loop: false,
-      prio: 10,
-      scale: 1,
-      color: '#1f5e40',
-      vmax: 55,
-      opacity: 0,
-      active: false,
-    }),
-  ] as Car[],
-  routeIndex: 0,
-  phase: 'waiting' as Phase,
-  timer: 0,
-})
+const cars: Car[] = [
+  makeCar(laneOf('h1', 1), { s: 60, vmax: 40, color: '#5aae80', prio: 3 }),
+  makeCar(laneOf('v2', -1), { s: 200, vmax: 36, color: '#3f9a6c', prio: 2 }),
+  makeCar(laneOf('h2', -1), { s: 300, vmax: 44, color: '#4fa274', prio: 1 }),
+  makeCar((routes[0] as Route).line, {
+    loop: false,
+    prio: 10,
+    scale: 1,
+    color: '#1f5e40',
+    vmax: 55,
+    opacity: 0,
+    active: false,
+  }),
+]
 
-const taxi = state.cars[state.cars.length - 1] as Car
-const currentRoute = computed(() => routes[state.routeIndex] as (typeof routes)[number])
+const taxi = cars[cars.length - 1] as Car
+const routeIndex = ref(0)
+const currentRoute = computed(() => routes[routeIndex.value] as Route)
+let phase: Phase = 'waiting'
+let timer = 0
+
+const carEls: (SVGGElement | null)[] = []
+const setCarEl = (i: number) => (el: unknown) => {
+  carEls[i] = el as SVGGElement | null
+}
+const routeEl = ref<SVGGElement | null>(null)
+const mapEl = ref<HTMLElement | null>(null)
+
+const carTransform = (c: Car) => `translate(${c.x.toFixed(2)} ${c.y.toFixed(2)}) rotate(${c.a.toFixed(1)})`
 
 function place(c: Car) {
   const l = locate(c.line, c.s)
@@ -252,12 +266,21 @@ function place(c: Car) {
   c.a = l.a
 }
 
+function render() {
+  cars.forEach((c, i) => {
+    const el = carEls[i]
+    if (!el) return
+    el.setAttribute('transform', carTransform(c))
+    if (!c.loop) el.setAttribute('opacity', c.opacity.toFixed(3))
+  })
+  routeEl.value?.setAttribute('opacity', taxi.opacity.toFixed(3))
+}
+
 function shouldYield(c: Car, o: Car, dist: number, dx: number, dy: number) {
-  const ar = (c.a * Math.PI) / 180
-  const ao = (o.a * Math.PI) / 180
+  const ar = c.a * RAD
   const ahead = (dx * Math.cos(ar) + dy * Math.sin(ar)) / dist
   if (ahead < 0.5) return false
-  const same = Math.cos(ar - ao)
+  const same = Math.cos(ar - o.a * RAD)
   if (same < -0.3) return false
   if (same > 0.7) return true
   if (c.stopped > 2) return false
@@ -265,67 +288,67 @@ function shouldYield(c: Car, o: Car, dist: number, dx: number, dy: number) {
 }
 
 function updateTaxi(dt: number) {
-  state.timer += dt
+  timer += dt
   const route = currentRoute.value
 
-  if (state.phase === 'waiting') {
+  if (phase === 'waiting') {
     taxi.line = route.line
     taxi.s = 0
     taxi.v = 0
     taxi.opacity = 0
     taxi.active = false
     place(taxi)
-    const clear = state.cars.every(
+    const clear = cars.every(
       (c) => c === taxi || !c.active || Math.hypot(c.x - route.start[0], c.y - route.start[1]) > 34,
     )
     if (clear) {
-      state.phase = 'fadeIn'
-      state.timer = 0
+      phase = 'fadeIn'
+      timer = 0
       taxi.active = true
     }
-  } else if (state.phase === 'fadeIn') {
-    taxi.opacity = Math.min(1, state.timer / FADE)
-    if (state.timer >= FADE) {
-      state.phase = 'drive'
-      state.timer = 0
+  } else if (phase === 'fadeIn') {
+    taxi.opacity = Math.min(1, timer / FADE)
+    if (timer >= FADE) {
+      phase = 'drive'
+      timer = 0
     }
-  } else if (state.phase === 'drive') {
+  } else if (phase === 'drive') {
     if (taxi.s >= taxi.line.len - 0.3) {
       taxi.s = taxi.line.len
       taxi.v = 0
-      state.phase = 'arrived'
-      state.timer = 0
+      phase = 'arrived'
+      timer = 0
     }
-  } else if (state.phase === 'arrived') {
-    if (state.timer >= PAUSE) {
-      state.phase = 'fadeOut'
-      state.timer = 0
+  } else if (phase === 'arrived') {
+    if (timer >= PAUSE) {
+      phase = 'fadeOut'
+      timer = 0
       taxi.active = false
     }
   } else {
-    taxi.opacity = Math.max(0, 1 - state.timer / FADE)
-    if (state.timer >= FADE) {
-      state.routeIndex = (state.routeIndex + 1) % routes.length
-      state.phase = 'waiting'
-      state.timer = 0
+    taxi.opacity = Math.max(0, 1 - timer / FADE)
+    if (timer >= FADE) {
+      routeIndex.value = (routeIndex.value + 1) % routes.length
+      phase = 'waiting'
+      timer = 0
     }
   }
 }
 
 function step(dt: number) {
-  for (const c of state.cars) {
+  for (const c of cars) {
     if (!c.active) continue
-    const moving = c.loop || state.phase === 'drive'
-    if (!moving) {
+    if (!c.loop && phase !== 'drive') {
       c.v = 0
       continue
     }
     let target = c.vmax
     if (!c.loop) target = Math.min(target, Math.sqrt(2 * TAXI_BRAKE * Math.max(c.line.len - c.s, 0)) + 1.5)
-    for (const o of state.cars) {
+    for (const o of cars) {
       if (o === c || !o.active) continue
       const dx = o.x - c.x
       const dy = o.y - c.y
+      if (Math.abs(dx) > LOOK || Math.abs(dy) > LOOK) continue
       const dist = Math.hypot(dx, dy)
       if (dist > LOOK || dist < 0.01) continue
       if (shouldYield(c, o, dist, dx, dy)) {
@@ -337,20 +360,35 @@ function step(dt: number) {
     c.stopped = c.v < 1 ? c.stopped + dt : 0
     if (c.loop && c.s > c.line.len) c.s = 0
   }
-  state.cars.forEach(place)
+  cars.forEach(place)
 }
 
-state.cars.forEach(place)
+cars.forEach(place)
 
 let raf = 0
 let last = 0
+let running = false
 
 function frame(time: number) {
+  if (!running) return
   const dt = last ? Math.min((time - last) / 1000, 0.05) : 0
   last = time
   updateTaxi(dt)
   step(dt)
+  render()
   raf = requestAnimationFrame(frame)
+}
+
+function startLoop() {
+  if (running) return
+  running = true
+  last = 0
+  raf = requestAnimationFrame(frame)
+}
+
+function stopLoop() {
+  running = false
+  cancelAnimationFrame(raf)
 }
 
 const heroActions = ref<HTMLElement | null>(null)
@@ -360,47 +398,66 @@ const ctaVisible = ref(false)
 const showBar = computed(() => passedHero.value && !ctaVisible.value)
 const observers: IntersectionObserver[] = []
 
+function watchEl(el: HTMLElement | null, cb: (entry: IntersectionObserverEntry) => void, options?: IntersectionObserverInit) {
+  if (!el) return
+  const observer = new IntersectionObserver(([entry]) => entry && cb(entry), options)
+  observer.observe(el)
+  observers.push(observer)
+}
+
 onMounted(() => {
-  raf = requestAnimationFrame(frame)
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
 
-  if (heroActions.value) {
-    const heroObserver = new IntersectionObserver(([entry]) => {
-      if (entry) passedHero.value = !entry.isIntersecting && entry.boundingClientRect.top < 0
-    })
-    heroObserver.observe(heroActions.value)
-    observers.push(heroObserver)
+  if (reduced) {
+    taxi.s = taxi.line.len
+    taxi.opacity = 1
+    place(taxi)
+    render()
+  } else {
+    watchEl(mapEl.value, (e) => (e.isIntersecting ? startLoop() : stopLoop()), { rootMargin: '100px' })
   }
 
-  if (ctaEl.value) {
-    const ctaObserver = new IntersectionObserver(([entry]) => {
-      if (entry) ctaVisible.value = entry.isIntersecting
-    })
-    ctaObserver.observe(ctaEl.value)
-    observers.push(ctaObserver)
-  }
+  watchEl(heroActions.value, (e) => {
+    passedHero.value = !e.isIntersecting && e.boundingClientRect.top < 0
+  })
+  watchEl(ctaEl.value, (e) => {
+    ctaVisible.value = e.isIntersecting
+  })
 })
 
-onBeforeUnmount(() => {
-  cancelAnimationFrame(raf)
-  observers.forEach((o) => o.disconnect())
-})
+let revealObserver: IntersectionObserver | null = null
+
+function getRevealObserver() {
+  revealObserver ??= new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        entry.target.classList.add('reveal--visible')
+        revealObserver?.unobserve(entry.target)
+      }
+    },
+    { threshold: 0.15, rootMargin: '0px 0px -40px 0px' },
+  )
+  return revealObserver
+}
 
 const vReveal: Directive<HTMLElement, number | undefined> = {
   mounted(el, binding) {
     el.classList.add('reveal')
     el.style.setProperty('--delay', `${binding.value ?? 0}ms`)
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry?.isIntersecting) {
-          el.classList.add('reveal--visible')
-          observer.disconnect()
-        }
-      },
-      { threshold: 0.15 },
-    )
-    observer.observe(el)
+    getRevealObserver().observe(el)
+  },
+  unmounted(el) {
+    revealObserver?.unobserve(el)
   },
 }
+
+onBeforeUnmount(() => {
+  stopLoop()
+  observers.forEach((o) => o.disconnect())
+  revealObserver?.disconnect()
+  revealObserver = null
+})
 
 const audiences = ['Вдень і вночі', 'Для роботи і відпочинку', 'Для сімей і компаній']
 const carClasses = ['Economy', 'Comfort', 'Business', 'Мінівен', 'Універсал', 'Електро']
@@ -419,8 +476,9 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     <section class="hero">
       <div class="hero__text">
         <h1 class="hero__title">
-          Потрібно добратись до певного місця
-          <span class="accent">призначення?</span>
+          Потрібно добратись до певного 
+          <span class="accent">місця призначення</span>
+          ?
         </h1>
 
         <p class="hero__subtitle">
@@ -437,8 +495,8 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
       <div class="hero__visual">
         <div class="blob"></div>
 
-        <div class="map-card">
-          <svg class="map" viewBox="0 0 500 520" preserveAspectRatio="xMidYMid slice">
+        <div ref="mapEl" class="map-card">
+          <svg class="map" viewBox="0 0 500 520" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
             <defs>
               <g id="car">
                 <rect x="-11" y="-5" width="22" height="10" rx="3.5" fill="currentColor" />
@@ -492,7 +550,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
               <path v-for="road in roads" :key="road.id" :d="road.d" :stroke-width="road.width" />
             </g>
 
-            <g :opacity="taxi.opacity">
+            <g ref="routeEl" opacity="0">
               <path
                 :d="currentRoute.d"
                 fill="none"
@@ -538,9 +596,10 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
             </g>
 
             <g
-              v-for="(car, i) in state.cars"
+              v-for="(car, i) in cars"
               :key="i"
-              :transform="`translate(${car.x.toFixed(2)} ${car.y.toFixed(2)}) rotate(${car.a.toFixed(1)})`"
+              :ref="setCarEl(i)"
+              :transform="carTransform(car)"
               :opacity="car.opacity"
             >
               <circle v-if="!car.loop" r="14" fill="#2f7d57" opacity="0.2">
@@ -711,7 +770,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
       <div v-if="showBar" class="mobile-bar">
         <div class="mobile-bar__info">
           <span class="mobile-bar__dot"></span>
-          <div>
+          <div class="mobile-bar__copy">
             <span class="mobile-bar__title">Таксі поруч</span>
             <span class="mobile-bar__text">Подача за кілька хвилин</span>
           </div>
@@ -724,10 +783,11 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
 <style scoped>
 .home {
-  --gutter: clamp(20px, 6vw, 96px);
+  --gutter: clamp(16px, 6vw, 96px);
   min-height: 100vh;
   padding: 0 var(--gutter);
   overflow-x: hidden;
+  overflow-x: clip;
 }
 
 .header {
@@ -764,11 +824,16 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
 .hero {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: clamp(40px, 5vw, 80px);
   align-items: center;
   min-height: calc(100vh - 100px);
   padding-bottom: 60px;
+}
+
+.hero__text,
+.hero__visual {
+  min-width: 0;
 }
 
 .hero__title {
@@ -778,6 +843,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   line-height: 1.15;
   letter-spacing: -0.02em;
   color: #2b2b26;
+  text-wrap: balance;
 }
 
 .accent {
@@ -790,6 +856,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-size: clamp(16px, 1.4vw, 19px);
   line-height: 1.7;
   color: #6b675c;
+  text-wrap: pretty;
 }
 
 .hero__subtitle strong {
@@ -808,8 +875,12 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-family: inherit;
   font-size: 16px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    background-color 0.2s ease,
+    border-color 0.2s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -846,10 +917,10 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
 .blob {
   position: absolute;
-  inset: 5%;
+  inset: -5%;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(47, 125, 87, 0.2), transparent 70%);
-  filter: blur(40px);
+  background: radial-gradient(closest-side, rgba(47, 125, 87, 0.18), rgba(47, 125, 87, 0.06) 60%, transparent);
+  pointer-events: none;
 }
 
 .map-card {
@@ -862,6 +933,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   border-radius: 32px;
   background: #fffdf8;
   box-shadow: 0 30px 70px rgba(60, 50, 30, 0.12);
+  contain: layout paint;
 }
 
 .map {
@@ -954,7 +1026,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
 .intro {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: clamp(32px, 5vw, 80px);
   align-items: end;
   margin-bottom: 56px;
@@ -980,6 +1052,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   line-height: 1.12;
   letter-spacing: -0.02em;
   color: #2b2b26;
+  text-wrap: balance;
 }
 
 .intro__body p {
@@ -987,6 +1060,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-size: 18px;
   line-height: 1.7;
   color: #6b675c;
+  text-wrap: pretty;
 }
 
 .pills {
@@ -1007,7 +1081,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
 .bento {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px;
 }
 
@@ -1016,6 +1090,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
   padding: 28px;
   border: 1px solid #ece5d6;
   border-radius: 28px;
@@ -1074,6 +1149,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-weight: 700;
   line-height: 1.3;
   color: #2b2b26;
+  text-wrap: balance;
 }
 
 .card--accent .card__title {
@@ -1085,6 +1161,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-size: 15px;
   line-height: 1.6;
   color: #6b675c;
+  text-wrap: pretty;
 }
 
 .card--accent .card__text {
@@ -1107,7 +1184,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-size: 14px;
   font-weight: 500;
   transition:
-    background 0.2s ease,
+    background-color 0.2s ease,
     color 0.2s ease;
 }
 
@@ -1196,7 +1273,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   width: 480px;
   height: 480px;
   border-radius: 50%;
-  background: radial-gradient(circle, rgba(90, 174, 128, 0.45), transparent 70%);
+  background: radial-gradient(closest-side, rgba(90, 174, 128, 0.45), transparent);
   pointer-events: none;
 }
 
@@ -1212,6 +1289,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   line-height: 1.2;
   letter-spacing: -0.01em;
   color: #fbf7ee;
+  text-wrap: balance;
 }
 
 .cta__text {
@@ -1233,8 +1311,12 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-family: inherit;
   font-size: 16px;
   font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    border-color 0.2s ease,
+    box-shadow 0.2s ease;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -1334,14 +1416,14 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
 @media (max-width: 960px) {
   .hero {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     min-height: auto;
     padding-top: 40px;
   }
 
   .hero__visual {
-    max-width: 620px;
     width: 100%;
+    max-width: 600px;
     margin: 0 auto;
   }
 
@@ -1350,12 +1432,12 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   }
 
   .intro {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     align-items: start;
   }
 
   .bento {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1380,84 +1462,77 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   }
 
   .hero {
-    gap: 32px;
-    padding-top: 20px;
-    padding-bottom: 20px;
+    gap: 28px;
+    padding-top: 16px;
+    padding-bottom: 16px;
   }
 
   .hero__title {
-    margin-bottom: 16px;
-    font-size: clamp(30px, 8.6vw, 40px);
+    margin-bottom: 14px;
+    font-size: clamp(28px, 8.4vw, 38px);
     line-height: 1.12;
   }
 
   .hero__subtitle {
-    margin-bottom: 28px;
-    font-size: 16px;
+    margin-bottom: 24px;
+    font-size: 15px;
     line-height: 1.65;
   }
 
   .hero__actions {
     display: grid;
-    grid-template-columns: 1.3fr 1fr;
+    grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
     gap: 10px;
   }
 
   .btn {
     width: 100%;
-    padding: 15px 12px;
+    padding: 14px 10px;
     font-size: 15px;
   }
 
   .hero__visual {
     flex-direction: column;
-    align-items: stretch;
+    align-items: center;
     padding: 0;
   }
 
   .blob {
-    inset: 0 -10% 20%;
+    inset: -10% -20% 10%;
   }
 
   .map-card {
-    max-width: none;
+    width: 100%;
+    max-width: 420px;
+    aspect-ratio: 1 / 1;
     padding: 8px;
-    border-radius: 26px;
+    border-radius: 24px;
     box-shadow: 0 20px 50px rgba(60, 50, 30, 0.12);
   }
 
   .map {
-    border-radius: 19px;
+    border-radius: 17px;
   }
 
-  .cards {
+    .cards {
     position: relative;
     top: auto;
     right: auto;
-    flex-direction: row;
+    align-self: stretch;
+    flex-direction: column;
     align-items: stretch;
-    gap: 12px;
-    margin: -44px calc(var(--gutter) * -1) 0;
-    padding: 0 var(--gutter) 18px;
-    overflow-x: auto;
-    scroll-snap-type: x mandatory;
-    scroll-padding: 0 var(--gutter);
-    scrollbar-width: none;
-    -webkit-overflow-scrolling: touch;
-  }
-
-  .cards::-webkit-scrollbar {
-    display: none;
+    gap: 10px;
+    margin-top: 14px;
   }
 
   .float-card {
-    flex: 0 0 auto;
-    padding: 12px 16px 12px 12px;
-    border-radius: 18px;
-    scroll-snap-align: start;
-    animation:
-      appear 0.7s ease forwards,
-      float 6s ease-in-out infinite;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: 16px;
+    background: #fffdf8;
+    backdrop-filter: none;
+    box-shadow: 0 8px 20px rgba(60, 50, 30, 0.08);
+    animation: appear 0.6s ease forwards;
   }
 
   .float-card:nth-child(2) {
@@ -1465,9 +1540,9 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   }
 
   .float-card__icon {
-    width: 38px;
-    height: 38px;
-    border-radius: 12px;
+    width: 36px;
+    height: 36px;
+    border-radius: 11px;
   }
 
   .float-card__icon svg {
@@ -1477,33 +1552,35 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
   .float-card__title {
     font-size: 14px;
+    white-space: normal;
   }
 
   .float-card__text {
     font-size: 12px;
+    white-space: normal;
   }
-
+  
   .about {
-    padding: 40px 0 120px;
+    padding: 36px 0 120px;
   }
 
   .intro {
-    gap: 18px;
-    margin-bottom: 28px;
+    gap: 16px;
+    margin-bottom: 26px;
   }
 
   .eyebrow {
-    margin-bottom: 14px;
+    margin-bottom: 12px;
     font-size: 12px;
   }
 
   .intro__title {
-    font-size: clamp(28px, 8vw, 36px);
+    font-size: clamp(26px, 7.6vw, 34px);
   }
 
   .intro__body p {
-    margin-bottom: 18px;
-    font-size: 16px;
+    margin-bottom: 16px;
+    font-size: 15px;
     line-height: 1.65;
   }
 
@@ -1512,68 +1589,68 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   }
 
   .pill {
-    padding: 7px 13px;
+    padding: 7px 12px;
     font-size: 13px;
   }
 
   .bento {
-    grid-template-columns: 1fr;
-    gap: 14px;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
   }
 
   .card {
     gap: 10px;
-    padding: 22px;
-    border-radius: 24px;
+    padding: 20px;
+    border-radius: 22px;
   }
 
   .card--wide {
-    grid-column: span 1;
+    grid-column: auto;
   }
 
   .card__icon {
-    width: 46px;
-    height: 46px;
+    width: 44px;
+    height: 44px;
     margin-bottom: 4px;
-    border-radius: 14px;
+    border-radius: 13px;
   }
 
   .card__icon svg {
-    width: 23px;
-    height: 23px;
+    width: 22px;
+    height: 22px;
   }
 
   .card__title {
-    font-size: 19px;
+    font-size: 18px;
   }
 
   .card__text {
-    font-size: 15px;
+    font-size: 14.5px;
   }
 
   .chip {
-    padding: 7px 12px;
+    padding: 7px 11px;
     font-size: 13px;
   }
 
   .cta {
     flex-direction: column;
     align-items: stretch;
-    gap: 22px;
-    margin-top: 14px;
-    padding: 30px 22px;
-    border-radius: 26px;
+    gap: 20px;
+    margin-top: 12px;
+    padding: 28px 20px;
+    border-radius: 24px;
   }
 
   .cta__glow {
     top: -30%;
-    right: -40%;
-    width: 360px;
-    height: 360px;
+    right: -45%;
+    width: 340px;
+    height: 340px;
   }
 
   .cta__title {
-    font-size: clamp(24px, 7vw, 30px);
+    font-size: clamp(22px, 6.6vw, 28px);
   }
 
   .cta__text {
@@ -1582,6 +1659,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
   .cta__actions {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
   }
 
@@ -1616,6 +1694,10 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     min-width: 0;
   }
 
+  .mobile-bar__copy {
+    min-width: 0;
+  }
+
   .mobile-bar__dot {
     flex-shrink: 0;
     width: 10px;
@@ -1634,16 +1716,16 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 
   .mobile-bar__text {
     display: block;
+    overflow: hidden;
     font-size: 12px;
     color: #8a8578;
     white-space: nowrap;
-    overflow: hidden;
     text-overflow: ellipsis;
   }
 
   .mobile-bar__btn {
     flex-shrink: 0;
-    padding: 13px 18px;
+    padding: 13px 16px;
     border: none;
     border-radius: 14px;
     background: #2f7d57;
@@ -1669,9 +1751,13 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   }
 }
 
-@media (max-width: 380px) {
+@media (max-width: 370px) {
   .hero__actions {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .hero__visual {
+    display: none;
   }
 
   .mobile-bar__text {
@@ -1683,7 +1769,12 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   .card:hover,
   .card.reveal--visible:hover {
     transform: none;
+    border-color: #ece5d6;
     box-shadow: 0 10px 30px rgba(60, 50, 30, 0.05);
+  }
+
+  .card--accent:hover {
+    border-color: transparent;
   }
 
   .chip:hover {
@@ -1696,21 +1787,22 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     transform: none;
   }
 
+  .btn--primary:hover {
+    background: #2f7d57;
+  }
+
   .btn:active,
   .cta__btn:active,
   .mobile-bar__btn:active {
     transform: scale(0.97);
-  }
-
-  .card:active {
-    transform: scale(0.985);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .float-card,
   .swap__arrow,
-  .route-flow {
+  .route-flow,
+  .mobile-bar__dot {
     animation: none;
     opacity: 1;
   }
