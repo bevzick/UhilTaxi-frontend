@@ -321,7 +321,7 @@ async function submit() {
               </div>
 
               <div v-else class="fields">
-                <div class="row">
+                <div class="row row--names">
                   <label class="field stagger" style="--i: 2" :class="{ 'field--error': errors.first_name }">
                     <span class="field__label">Ім'я</span>
                     <input
@@ -488,6 +488,7 @@ async function submit() {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
   min-height: 100vh;
+  min-height: 100dvh;
   overflow: hidden;
 }
 
@@ -1221,6 +1222,287 @@ async function submit() {
 @keyframes spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes side-down {
+  from {
+    clip-path: inset(0 0 100% 0 round 0 0 32px 32px);
+  }
+  to {
+    clip-path: inset(0 0 0 0 round 0 0 32px 32px);
+  }
+}
+
+@keyframes sheet-up {
+  from {
+    opacity: 0;
+    transform: translateY(40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1100px) {
+  .side {
+    padding: 36px 40px 40px;
+  }
+
+  .main {
+    padding: 40px 32px;
+  }
+}
+
+@media (max-width: 860px) {
+  .auth {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    overflow: visible;
+  }
+
+  .side {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      'logo logo'
+      'content route';
+    align-items: end;
+    gap: 28px 16px;
+    padding: calc(20px + env(safe-area-inset-top)) 24px 56px;
+    border-radius: 0 0 32px 32px;
+    animation: side-down 0.9s var(--ease-out) backwards;
+  }
+
+  .side__glow {
+    top: -40%;
+    right: -50%;
+    width: 420px;
+    height: 420px;
+  }
+
+  .logo {
+    grid-area: logo;
+  }
+
+  .logo__icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 11px;
+    font-size: 20px;
+  }
+
+  .logo__name {
+    font-size: 21px;
+  }
+
+  .side__content {
+    grid-area: content;
+  }
+
+  .side__title {
+    margin-bottom: 10px;
+    font-size: clamp(28px, 6.4vw, 40px);
+  }
+
+  .side__text {
+    font-size: 15px;
+  }
+
+  .side__route {
+    grid-area: route;
+    width: clamp(150px, 34vw, 260px);
+    margin-bottom: 6px;
+  }
+
+  .main {
+    position: relative;
+    z-index: 1;
+    align-items: start;
+    margin-top: -28px;
+    padding: 28px 24px calc(32px + env(safe-area-inset-bottom));
+    border-radius: 28px 28px 0 0;
+    background: #fbf7ee;
+    animation: sheet-up 0.7s 0.25s var(--ease-out) backwards;
+  }
+
+  .panel {
+    max-width: 520px;
+    margin: 0 auto;
+  }
+
+  .switch {
+    margin-bottom: 28px;
+  }
+
+  .head {
+    margin-bottom: 22px;
+  }
+
+  .head__title {
+    font-size: 28px;
+  }
+
+  .head__text {
+    font-size: 15px;
+  }
+
+  .field__input {
+    height: 54px;
+    font-size: 16px;
+  }
+
+  .submit {
+    height: 58px;
+    font-size: 17px;
+  }
+
+  .foot {
+    margin-top: 22px;
+  }
+}
+
+@media (max-width: 520px) {
+  .side {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      'logo'
+      'content';
+    gap: 22px;
+    padding: calc(16px + env(safe-area-inset-top)) 20px 50px;
+  }
+
+  .side__route {
+    position: absolute;
+    right: -24px;
+    bottom: 18px;
+    width: 170px;
+    margin: 0;
+    opacity: 0.55;
+    pointer-events: none;
+  }
+
+  .side__text {
+    display: none;
+  }
+
+  .side__title {
+    margin: 0;
+    font-size: clamp(27px, 8.2vw, 34px);
+  }
+
+  .main {
+    padding: 24px 18px calc(28px + env(safe-area-inset-bottom));
+    border-radius: 26px 26px 0 0;
+  }
+
+  .switch {
+    margin-bottom: 24px;
+    border-radius: 14px;
+  }
+
+  .switch__pill {
+    border-radius: 10px;
+  }
+
+  .switch__btn {
+    padding: 13px 10px;
+  }
+
+  .head__title {
+    font-size: 26px;
+  }
+
+  .fields {
+    gap: 14px;
+  }
+
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+
+  .row--names {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .field__label em {
+    display: block;
+    margin: 2px 0 0;
+    font-size: 12px;
+  }
+
+  .field__label {
+    font-size: 13.5px;
+  }
+
+  .field__input {
+    padding: 0 14px;
+    border-radius: 13px;
+  }
+
+  .field__control .field__input {
+    padding-right: 50px;
+  }
+
+  .alert {
+    font-size: 13.5px;
+  }
+}
+
+@media (max-width: 350px) {
+  .row--names {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .side__route {
+    display: none;
+  }
+}
+
+@media (hover: none) {
+  .submit:hover:not(:disabled) {
+    background: #2f7d57;
+    transform: none;
+    box-shadow: 0 10px 28px rgba(47, 125, 87, 0.28);
+  }
+
+  .submit:hover:not(:disabled) .submit__shine {
+    transform: translateX(-160%) skewX(-20deg);
+  }
+
+  .submit:active:not(:disabled) .submit__shine {
+    transform: translateX(120%) skewX(-20deg);
+  }
+
+  .submit:hover:not(:disabled) .submit__arrow {
+    transform: none;
+  }
+
+  .submit:active:not(:disabled) {
+    transform: scale(0.98);
+  }
+
+  .field__input:focus {
+    transform: none;
+  }
+
+  .field__eye:hover {
+    background: transparent;
+    color: #8a8578;
+  }
+
+  .field__eye:active {
+    background: #f1ebdd;
+  }
+
+  .switch__btn,
+  .foot__link,
+  .field__eye,
+  .submit {
+    -webkit-tap-highlight-color: transparent;
   }
 }
 
