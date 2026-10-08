@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, markRaw, onBeforeUnmount, onMounted, reactive } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, reactive, type Directive } from 'vue'
 
 type Pt = [number, number]
 type Phase = 'waiting' | 'fadeIn' | 'drive' | 'arrived' | 'fadeOut'
@@ -360,6 +360,27 @@ onMounted(() => {
 onBeforeUnmount(() => {
   cancelAnimationFrame(raf)
 })
+
+const vReveal: Directive<HTMLElement, number | undefined> = {
+  mounted(el, binding) {
+    el.classList.add('reveal')
+    el.style.setProperty('--delay', `${binding.value ?? 0}ms`)
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          el.classList.add('reveal--visible')
+          observer.disconnect()
+        }
+      },
+      { threshold: 0.15 },
+    )
+    observer.observe(el)
+  },
+}
+
+const audiences = ['Вдень і вночі', 'Для роботи і відпочинку', 'Для сімей і компаній']
+const carClasses = ['Economy', 'Comfort', 'Business', 'Мінівен', 'Універсал', 'Електро']
+const luggage = ['Великі валізи', 'Дитяче крісло', 'Компанія друзів']
 </script>
 
 <template>
@@ -544,6 +565,120 @@ onBeforeUnmount(() => {
               <span class="float-card__text">Навіть у час пік</span>
             </div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="about">
+      <div class="intro">
+        <div v-reveal class="intro__head">
+          <span class="eyebrow">Про UhilTaxi</span>
+          <h2 class="intro__title">
+            Таксі для кожного <br />
+            <span class="accent">і для будь-якої ситуації</span>
+          </h2>
+        </div>
+
+        <div v-reveal="150" class="intro__body">
+          <p>
+            Ми надаємо послуги для різних людей, у різний час і для різних ситуацій. Підлаштовуємось під ваші
+            потреби та вподобання, щоб кожна поїздка була саме такою, як вам потрібно.
+          </p>
+          <div class="pills">
+            <span v-for="item in audiences" :key="item" class="pill">{{ item }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="bento">
+        <article v-reveal class="card card--wide">
+          <div class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M5 17h14M6 17v2M18 17v2" />
+              <path d="M4 17v-4l2-5a2 2 0 0 1 1.9-1.4h8.2A2 2 0 0 1 18 8l2 5v4" />
+              <path d="M4 13h16" />
+              <circle cx="7.5" cy="15" r="0.6" fill="currentColor" />
+              <circle cx="16.5" cy="15" r="0.6" fill="currentColor" />
+            </svg>
+          </div>
+          <h3 class="card__title">Обирайте клас, марку і тип автомобіля</h3>
+          <p class="card__text">
+            Від економного авто для щоденних поїздок до бізнес-класу для важливих зустрічей — ви самі вирішуєте, на
+            чому їхати.
+          </p>
+          <div class="chips">
+            <span v-for="item in carClasses" :key="item" class="chip">{{ item }}</span>
+          </div>
+        </article>
+
+        <article v-reveal="100" class="card">
+          <div class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 0 1 15.5-6.2L21 8" />
+              <path d="M21 3v5h-5" />
+              <path d="M21 12a9 9 0 0 1-15.5 6.2L3 16" />
+              <path d="M3 21v-5h5" />
+            </svg>
+          </div>
+          <h3 class="card__title">Не сподобався водій?</h3>
+          <p class="card__text">Просто змініть його. Ваш комфорт для нас важливіший за все.</p>
+          <div class="swap">
+            <span class="avatar avatar--old">ОК</span>
+            <span class="swap__arrow">→</span>
+            <span class="avatar avatar--new">МВ</span>
+          </div>
+        </article>
+
+        <article v-reveal="0" class="card">
+          <div class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2.7c3 3.4 6 7 6 10.3a6 6 0 0 1-12 0c0-3.3 3-6.9 6-10.3Z" />
+            </svg>
+          </div>
+          <h3 class="card__title">Вода та серветки</h3>
+          <p class="card__text">У кожному авто безкоштовно. Дрібниця, яка робить поїздку приємнішою.</p>
+          <span class="badge">Безкоштовно</span>
+        </article>
+
+        <article v-reveal="100" class="card">
+          <div class="card__icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="5" y="7" width="14" height="13" rx="2" />
+              <path d="M9 7V4h6v3M9 11v5M15 11v5" />
+            </svg>
+          </div>
+          <h3 class="card__title">Будь-який багаж і кількість людей</h3>
+          <p class="card__text">Скільки б вас не було і що б ви не везли — знайдемо машину під ваше завдання.</p>
+          <div class="chips chips--small">
+            <span v-for="item in luggage" :key="item" class="chip">{{ item }}</span>
+          </div>
+        </article>
+
+        <article v-reveal="200" class="card card--accent">
+          <div class="card__icon card__icon--light">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="5.5" cy="10" r="2" />
+              <circle cx="9.5" cy="5.5" r="2" />
+              <circle cx="14.5" cy="5.5" r="2" />
+              <circle cx="18.5" cy="10" r="2" />
+              <path d="M12 11c-3 0-6 4.5-6 7a2.5 2.5 0 0 0 3.2 2.4c1-.3 1.8-.6 2.8-.6s1.8.3 2.8.6A2.5 2.5 0 0 0 18 18c0-2.5-3-7-6-7Z" />
+            </svg>
+          </div>
+          <h3 class="card__title">Навіть домашні улюбленці!</h3>
+          <p class="card__text">Беріть із собою чотирилапого друга — це не проблема.</p>
+          <span class="note">* за деяких умов</span>
+        </article>
+      </div>
+
+      <div v-reveal class="cta">
+        <div class="cta__glow"></div>
+        <div class="cta__content">
+          <h2 class="cta__title">Машина для будь-якої ситуації — тільки в нас</h2>
+          <p class="cta__text">Користуйтеся UhilTaxi та підбирайте авто саме під свої потреби.</p>
+        </div>
+        <div class="cta__actions">
+          <button class="cta__btn cta__btn--primary">Зареєструватись</button>
+          <button class="cta__btn cta__btn--ghost">Увійти</button>
         </div>
       </div>
     </section>
@@ -774,6 +909,336 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
+.about {
+  padding: 80px 0 100px;
+}
+
+.intro {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: clamp(32px, 5vw, 80px);
+  align-items: end;
+  margin-bottom: 56px;
+}
+
+.eyebrow {
+  display: inline-block;
+  margin-bottom: 18px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: #e3efe7;
+  color: #2f7d57;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.intro__title {
+  margin: 0;
+  font-size: clamp(32px, 3.8vw, 52px);
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.02em;
+  color: #2b2b26;
+}
+
+.intro__body p {
+  margin: 0 0 24px;
+  font-size: 18px;
+  line-height: 1.7;
+  color: #6b675c;
+}
+
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.pill {
+  padding: 8px 16px;
+  border: 1px solid #e3dccb;
+  border-radius: 999px;
+  background: #fffdf8;
+  color: #4a473f;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.bento {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+.card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 28px;
+  border: 1px solid #ece5d6;
+  border-radius: 28px;
+  background: #fffdf8;
+  box-shadow: 0 10px 30px rgba(60, 50, 30, 0.05);
+  transition:
+    transform 0.3s ease,
+    box-shadow 0.3s ease,
+    border-color 0.3s ease;
+}
+
+.card:hover {
+  transform: translateY(-6px);
+  border-color: #cfe3d6;
+  box-shadow: 0 24px 50px rgba(60, 50, 30, 0.1);
+}
+
+.card--wide {
+  grid-column: span 2;
+}
+
+.card--accent {
+  border-color: transparent;
+  background: linear-gradient(150deg, #3f9a6c, #2f7d57 60%, #266a49);
+  color: #fbf7ee;
+}
+
+.card--accent:hover {
+  border-color: transparent;
+}
+
+.card__icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: 8px;
+  border-radius: 16px;
+  background: #e3efe7;
+  color: #2f7d57;
+}
+
+.card__icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.card__icon--light {
+  background: rgba(251, 247, 238, 0.18);
+  color: #fbf7ee;
+}
+
+.card__title {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 700;
+  line-height: 1.3;
+  color: #2b2b26;
+}
+
+.card--accent .card__title {
+  color: #fbf7ee;
+}
+
+.card__text {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.6;
+  color: #6b675c;
+}
+
+.card--accent .card__text {
+  color: rgba(251, 247, 238, 0.85);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.chip {
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: #f4efe3;
+  color: #2b2b26;
+  font-size: 14px;
+  font-weight: 500;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease;
+}
+
+.chip:hover {
+  background: #2f7d57;
+  color: #fbf7ee;
+}
+
+.chips--small .chip {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.swap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.avatar--old {
+  background: #f4efe3;
+  color: #a39e90;
+  text-decoration: line-through;
+}
+
+.avatar--new {
+  background: #2f7d57;
+  color: #fbf7ee;
+  box-shadow: 0 0 0 4px #e3efe7;
+}
+
+.swap__arrow {
+  color: #2f7d57;
+  font-size: 20px;
+  font-weight: 700;
+  animation: nudge 1.6s ease-in-out infinite;
+}
+
+.badge {
+  align-self: flex-start;
+  margin-top: auto;
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: #e3efe7;
+  color: #2f7d57;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.note {
+  margin-top: auto;
+  font-size: 13px;
+  color: rgba(251, 247, 238, 0.7);
+}
+
+.cta {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 28px;
+  margin-top: 20px;
+  padding: clamp(32px, 4vw, 52px);
+  border-radius: 32px;
+  background: #1f3d2e;
+  overflow: hidden;
+}
+
+.cta__glow {
+  position: absolute;
+  top: -50%;
+  right: -10%;
+  width: 480px;
+  height: 480px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(90, 174, 128, 0.45), transparent 70%);
+  pointer-events: none;
+}
+
+.cta__content {
+  position: relative;
+  max-width: 620px;
+}
+
+.cta__title {
+  margin: 0 0 10px;
+  font-size: clamp(26px, 2.8vw, 38px);
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+  color: #fbf7ee;
+}
+
+.cta__text {
+  margin: 0;
+  font-size: 17px;
+  color: rgba(251, 247, 238, 0.75);
+}
+
+.cta__actions {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.cta__btn {
+  padding: 16px 30px;
+  border-radius: 14px;
+  font-family: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cta__btn--primary {
+  border: 2px solid #fbf7ee;
+  background: #fbf7ee;
+  color: #1f3d2e;
+}
+
+.cta__btn--primary:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+}
+
+.cta__btn--ghost {
+  border: 2px solid rgba(251, 247, 238, 0.35);
+  background: transparent;
+  color: #fbf7ee;
+}
+
+.cta__btn--ghost:hover {
+  border-color: #fbf7ee;
+  transform: translateY(-2px);
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(40px);
+  transition:
+    opacity 0.8s ease,
+    transform 0.8s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition-delay: var(--delay);
+}
+
+.reveal--visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.card.reveal--visible:hover {
+  transform: translateY(-6px);
+  transition-delay: 0s;
+}
+
 @keyframes flow {
   to {
     stroke-dashoffset: -20;
@@ -801,6 +1266,16 @@ onBeforeUnmount(() => {
   }
 }
 
+@keyframes nudge {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  50% {
+    transform: translateX(4px);
+  }
+}
+
 @media (max-width: 960px) {
   .hero {
     grid-template-columns: 1fr;
@@ -810,6 +1285,25 @@ onBeforeUnmount(() => {
 
   .cards {
     right: 0;
+  }
+
+  .intro {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .bento {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .bento {
+    grid-template-columns: 1fr;
+  }
+
+  .card--wide {
+    grid-column: span 1;
   }
 }
 
