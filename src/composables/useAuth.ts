@@ -20,22 +20,55 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const isValidToken = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= MAX_TOKEN_LENGTH && TOKEN_RE.test(value)
 
-function isValidSession(value: unknown): value is Session {
-  if (!isObject(value) || !isValidToken(value.token)) return false
-  if (value.expiresAt !== null && (typeof value.expiresAt !== 'number' || !Number.isFinite(value.expiresAt))) return false
-  return value.user === null || isObject(value.user)
+const DATE_RE = /^\d{4}-\d{2}-\d{2}/
+
+const text = (value: unknown, max: number) => (typeof value === 'string' && value.length <= max ? value : null)
+
+function toId(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return value
+  if (typeof value === 'string' && /^\d{1,15}$/.test(value)) return Number(value)
+  return null
+}
+
+function toUser(value: unknown): UserResponse | null {
+  if (!isObject(value)) return null
+  const id = toId(value.id)
+  if (id === null) return null
+
+  const birth = text(value.birth_date, 40)
+
+  return {
+    id,
+    first_name: text(value.first_name, 100),
+    last_name: text(value.last_name, 100),
+    phone: text(value.phone, 20),
+    email: text(value.email, 254),
+    role: text(value.role, 50),
+    status: text(value.status, 50),
+    birth_date: birth && DATE_RE.test(birth) ? birth.slice(0, 10) : null,
+  }
+}
+
+function toStoredSession(value: unknown): Session | null {
+  if (!isObject(value) || !isValidToken(value.token)) return null
+
+  const raw = value.expiresAt
+  let expiresAt: number | null
+
+  if (raw === null) expiresAt = null
+  else if (typeof raw === 'number' && Number.isFinite(raw) && raw > Date.now()) expiresAt = raw
+  else return null
+
+  return { token: value.token, expiresAt, user: toUser(value.user) }
 }
 
 function readStorage(): Session | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-    const parsed: unknown = JSON.parse(raw)
-    if (!isValidSession(parsed) || (parsed.expiresAt !== null && parsed.expiresAt <= Date.now())) {
-      localStorage.removeItem(STORAGE_KEY)
-      return null
-    }
-    return parsed
+    const stored = toStoredSession(JSON.parse(raw) as unknown)
+    if (!stored) localStorage.removeItem(STORAGE_KEY)
+    return stored
   } catch {
     return null
   }
@@ -67,7 +100,7 @@ function toSession(response: unknown): Session | null {
   return {
     token: response.access_token,
     expiresAt: validExpires ? Date.now() + expiresIn * 1000 : null,
-    user: isObject(response.user) ? (response.user as UserResponse) : null,
+    user: toUser(response.user),
   }
 }
 

@@ -18,13 +18,20 @@ export interface ChangePasswordRequest {
 }
 
 export interface UserResponse {
-  id?: number | string
-  first_name?: string | null
-  last_name?: string | null
-  phone?: string | null
-  email?: string | null
-  birth_date?: string | null
-  [key: string]: unknown
+  id: number
+  first_name: string | null
+  last_name: string | null
+  phone: string | null
+  email: string | null
+  role: string | null
+  status: string | null
+  birth_date: string | null
+}
+
+export interface UpdateMeRequest {
+  first_name: string | null
+  last_name: string | null
+  email: string | null
 }
 
 export interface AuthResponse {

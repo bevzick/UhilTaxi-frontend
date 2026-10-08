@@ -60,7 +60,7 @@ const registerForm = reactive({
   birth_date: '',
 })
 
-const redirectTo = computed(() => safeRedirect(route.query.redirect))
+const redirectTo = computed(() => safeRedirect(route.query.redirect, '/app'))
 const today = new Date().toISOString().slice(0, 10)
 const checks = computed(() => passwordChecks(registerForm.password))
 const showChecks = computed(() => passwordFocused.value || registerForm.password.length > 0)
