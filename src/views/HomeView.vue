@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, markRaw, onBeforeUnmount, onMounted, reactive, type Directive } from 'vue'
+import { computed, markRaw, onBeforeUnmount, onMounted, reactive, ref, type Directive } from 'vue'
 
 type Pt = [number, number]
 type Phase = 'waiting' | 'fadeIn' | 'drive' | 'arrived' | 'fadeOut'
@@ -353,12 +353,36 @@ function frame(time: number) {
   raf = requestAnimationFrame(frame)
 }
 
+const heroActions = ref<HTMLElement | null>(null)
+const ctaEl = ref<HTMLElement | null>(null)
+const passedHero = ref(false)
+const ctaVisible = ref(false)
+const showBar = computed(() => passedHero.value && !ctaVisible.value)
+const observers: IntersectionObserver[] = []
+
 onMounted(() => {
   raf = requestAnimationFrame(frame)
+
+  if (heroActions.value) {
+    const heroObserver = new IntersectionObserver(([entry]) => {
+      if (entry) passedHero.value = !entry.isIntersecting && entry.boundingClientRect.top < 0
+    })
+    heroObserver.observe(heroActions.value)
+    observers.push(heroObserver)
+  }
+
+  if (ctaEl.value) {
+    const ctaObserver = new IntersectionObserver(([entry]) => {
+      if (entry) ctaVisible.value = entry.isIntersecting
+    })
+    ctaObserver.observe(ctaEl.value)
+    observers.push(ctaObserver)
+  }
 })
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(raf)
+  observers.forEach((o) => o.disconnect())
 })
 
 const vReveal: Directive<HTMLElement, number | undefined> = {
@@ -404,7 +428,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
           Реєструйся і замовляй своє таксі.
         </p>
 
-        <div class="hero__actions">
+        <div ref="heroActions" class="hero__actions">
           <button class="btn btn--primary">Зареєструватись</button>
           <button class="btn btn--secondary">Увійти</button>
         </div>
@@ -574,8 +598,8 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
         <div v-reveal class="intro__head">
           <span class="eyebrow">Про UhilTaxi</span>
           <h2 class="intro__title">
-            Таксі для кожного <br />
-            <span class="accent">і для будь-якої ситуації</span>
+            Таксі для кожного.<br />
+            <span class="accent">Для будь-якої ситуації.</span>
           </h2>
         </div>
 
@@ -670,7 +694,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
         </article>
       </div>
 
-      <div v-reveal class="cta">
+      <div ref="ctaEl" v-reveal class="cta">
         <div class="cta__glow"></div>
         <div class="cta__content">
           <h2 class="cta__title">Машина для будь-якої ситуації — тільки в нас</h2>
@@ -682,13 +706,27 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
         </div>
       </div>
     </section>
+
+    <Transition name="bar">
+      <div v-if="showBar" class="mobile-bar">
+        <div class="mobile-bar__info">
+          <span class="mobile-bar__dot"></span>
+          <div>
+            <span class="mobile-bar__title">Таксі поруч</span>
+            <span class="mobile-bar__text">Подача за кілька хвилин</span>
+          </div>
+        </div>
+        <button class="mobile-bar__btn">Зареєструватись</button>
+      </div>
+    </Transition>
   </main>
 </template>
 
 <style scoped>
 .home {
+  --gutter: clamp(20px, 6vw, 96px);
   min-height: 100vh;
-  padding: 0 clamp(20px, 6vw, 96px);
+  padding: 0 var(--gutter);
   overflow-x: hidden;
 }
 
@@ -772,6 +810,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .btn--primary {
@@ -1196,6 +1235,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .cta__btn--primary {
@@ -1239,6 +1279,10 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   transition-delay: 0s;
 }
 
+.mobile-bar {
+  display: none;
+}
+
 @keyframes flow {
   to {
     stroke-dashoffset: -20;
@@ -1276,6 +1320,18 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   }
 }
 
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(47, 125, 87, 0.6);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(47, 125, 87, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(47, 125, 87, 0);
+  }
+}
+
 @media (max-width: 960px) {
   .hero {
     grid-template-columns: 1fr;
@@ -1283,8 +1339,14 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     padding-top: 40px;
   }
 
+  .hero__visual {
+    max-width: 620px;
+    width: 100%;
+    margin: 0 auto;
+  }
+
   .cards {
-    right: 0;
+    right: -2%;
   }
 
   .intro {
@@ -1298,18 +1360,104 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
 }
 
 @media (max-width: 640px) {
-  .bento {
-    grid-template-columns: 1fr;
+  .header {
+    padding: 18px 0;
   }
 
-  .card--wide {
-    grid-column: span 1;
+  .logo {
+    gap: 10px;
   }
-}
 
-@media (max-width: 520px) {
+  .logo__icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 11px;
+    font-size: 19px;
+  }
+
+  .logo__name {
+    font-size: 20px;
+  }
+
+  .hero {
+    gap: 32px;
+    padding-top: 20px;
+    padding-bottom: 20px;
+  }
+
+  .hero__title {
+    margin-bottom: 16px;
+    font-size: clamp(30px, 8.6vw, 40px);
+    line-height: 1.12;
+  }
+
+  .hero__subtitle {
+    margin-bottom: 28px;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+
+  .hero__actions {
+    display: grid;
+    grid-template-columns: 1.3fr 1fr;
+    gap: 10px;
+  }
+
+  .btn {
+    width: 100%;
+    padding: 15px 12px;
+    font-size: 15px;
+  }
+
+  .hero__visual {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0;
+  }
+
+  .blob {
+    inset: 0 -10% 20%;
+  }
+
+  .map-card {
+    max-width: none;
+    padding: 8px;
+    border-radius: 26px;
+    box-shadow: 0 20px 50px rgba(60, 50, 30, 0.12);
+  }
+
+  .map {
+    border-radius: 19px;
+  }
+
+  .cards {
+    position: relative;
+    top: auto;
+    right: auto;
+    flex-direction: row;
+    align-items: stretch;
+    gap: 12px;
+    margin: -44px calc(var(--gutter) * -1) 0;
+    padding: 0 var(--gutter) 18px;
+    overflow-x: auto;
+    scroll-snap-type: x mandatory;
+    scroll-padding: 0 var(--gutter);
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .cards::-webkit-scrollbar {
+    display: none;
+  }
+
   .float-card {
-    padding: 10px 14px 10px 10px;
+    flex: 0 0 auto;
+    padding: 12px 16px 12px 12px;
+    border-radius: 18px;
+    scroll-snap-align: start;
+    animation:
+      appear 0.7s ease forwards,
+      float 6s ease-in-out infinite;
   }
 
   .float-card:nth-child(2) {
@@ -1317,16 +1465,260 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
   }
 
   .float-card__icon {
-    width: 34px;
-    height: 34px;
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+  }
+
+  .float-card__icon svg {
+    width: 18px;
+    height: 18px;
   }
 
   .float-card__title {
-    font-size: 13px;
+    font-size: 14px;
   }
 
   .float-card__text {
-    font-size: 11px;
+    font-size: 12px;
+  }
+
+  .about {
+    padding: 40px 0 120px;
+  }
+
+  .intro {
+    gap: 18px;
+    margin-bottom: 28px;
+  }
+
+  .eyebrow {
+    margin-bottom: 14px;
+    font-size: 12px;
+  }
+
+  .intro__title {
+    font-size: clamp(28px, 8vw, 36px);
+  }
+
+  .intro__body p {
+    margin-bottom: 18px;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+
+  .pills {
+    gap: 8px;
+  }
+
+  .pill {
+    padding: 7px 13px;
+    font-size: 13px;
+  }
+
+  .bento {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .card {
+    gap: 10px;
+    padding: 22px;
+    border-radius: 24px;
+  }
+
+  .card--wide {
+    grid-column: span 1;
+  }
+
+  .card__icon {
+    width: 46px;
+    height: 46px;
+    margin-bottom: 4px;
+    border-radius: 14px;
+  }
+
+  .card__icon svg {
+    width: 23px;
+    height: 23px;
+  }
+
+  .card__title {
+    font-size: 19px;
+  }
+
+  .card__text {
+    font-size: 15px;
+  }
+
+  .chip {
+    padding: 7px 12px;
+    font-size: 13px;
+  }
+
+  .cta {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 22px;
+    margin-top: 14px;
+    padding: 30px 22px;
+    border-radius: 26px;
+  }
+
+  .cta__glow {
+    top: -30%;
+    right: -40%;
+    width: 360px;
+    height: 360px;
+  }
+
+  .cta__title {
+    font-size: clamp(24px, 7vw, 30px);
+  }
+
+  .cta__text {
+    font-size: 15px;
+  }
+
+  .cta__actions {
+    display: grid;
+    gap: 10px;
+  }
+
+  .cta__btn {
+    width: 100%;
+    padding: 15px 20px;
+  }
+
+  .mobile-bar {
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    z-index: 50;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 10px 10px 16px;
+    border: 1px solid #ece5d6;
+    border-radius: 20px;
+    background: rgba(255, 253, 248, 0.92);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: 0 16px 40px rgba(60, 50, 30, 0.18);
+  }
+
+  .mobile-bar__info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .mobile-bar__dot {
+    flex-shrink: 0;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #2f7d57;
+    animation: pulse 2s infinite;
+  }
+
+  .mobile-bar__title {
+    display: block;
+    font-size: 14px;
+    font-weight: 600;
+    color: #2b2b26;
+  }
+
+  .mobile-bar__text {
+    display: block;
+    font-size: 12px;
+    color: #8a8578;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mobile-bar__btn {
+    flex-shrink: 0;
+    padding: 13px 18px;
+    border: none;
+    border-radius: 14px;
+    background: #2f7d57;
+    color: #fbf7ee;
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    box-shadow: 0 6px 16px rgba(47, 125, 87, 0.3);
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .bar-enter-active,
+  .bar-leave-active {
+    transition:
+      transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1),
+      opacity 0.3s ease;
+  }
+
+  .bar-enter-from,
+  .bar-leave-to {
+    opacity: 0;
+    transform: translateY(120%);
+  }
+}
+
+@media (max-width: 380px) {
+  .hero__actions {
+    grid-template-columns: 1fr;
+  }
+
+  .mobile-bar__text {
+    display: none;
+  }
+}
+
+@media (hover: none) {
+  .card:hover,
+  .card.reveal--visible:hover {
+    transform: none;
+    box-shadow: 0 10px 30px rgba(60, 50, 30, 0.05);
+  }
+
+  .chip:hover {
+    background: #f4efe3;
+    color: #2b2b26;
+  }
+
+  .btn:hover,
+  .cta__btn:hover {
+    transform: none;
+  }
+
+  .btn:active,
+  .cta__btn:active,
+  .mobile-bar__btn:active {
+    transform: scale(0.97);
+  }
+
+  .card:active {
+    transform: scale(0.985);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float-card,
+  .swap__arrow,
+  .route-flow {
+    animation: none;
+    opacity: 1;
+  }
+
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
   }
 }
 </style>
