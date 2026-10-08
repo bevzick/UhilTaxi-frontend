@@ -37,7 +37,9 @@ All config comes from `VITE_*` vars in `.env` (`.env.example` is currently empty
 - `VITE_API_URL` — API base URL (must be https in production builds)
 - `VITE_AUTH_LOGIN_URL`, `VITE_AUTH_REGISTER_URL`, `VITE_ORDERS_URL` — endpoint *paths* appended to `VITE_API_URL` (must start with `/`)
 - `VITE_GEOCODER_URL` — Nominatim-compatible geocoder base (https; http allowed only in dev)
-- `VITE_MAP_TILES_URL` — optional Leaflet tile template (defaults to CARTO Voyager)
+- `VITE_MAP_TILES_URL` — optional Leaflet tile template (defaults to OpenStreetMap; CARTO basemaps now return an "API KEY REQUIRED" watermark without a key)
+
+`index.html` sets a strict Content-Security-Policy via `<meta>`. Any new external origin (tile server, geocoder, API host) must be added to `img-src`/`connect-src` there, or the browser silently blocks it — this is what previously made the map render blank.
 
 ## Architecture
 
@@ -54,9 +56,4 @@ All config comes from `VITE_*` vars in `.env` (`.env.example` is currently empty
 
 **Defensive input handling is a deliberate project convention** (see recent commits on form protection): all free text passes through `clean()` (NFC/NFKC normalize + strip invisible/bidi chars) and length caps; server messages go through `safeMessage()`; external JSON is treated as `unknown` and narrowed with `isRecord`/`isObject` guards. Follow the same pattern for new inputs and API responses.
 
-**Views**: `MapView.vue` owns the Leaflet map imperatively (markers, route curve from `utils/geo.curvePoints`, geolocation via `useGeolocation`) and hosts `OrderSheet.vue` (order form) which uses `AddressInput.vue` (geocoder autocomplete). Views are large single-file components with scoped styles; the color palette (cream `#fbf7ee`, green `#2f7d57`) and Inter font are set globally in `App.vue`. Layouts are tuned separately for mobile (breakpoint ~720px).
-
-## Known issues in the working tree
-
-- `api/geocode.ts`, `api/orders.ts`, and `views/MapView.vue` import `@/config/city`, but the file is at `src/api/config/city.ts` — the import path or file location needs reconciling.
-- `leaflet` (and `@types/leaflet`) is imported by `MapView.vue` but not listed in `package.json` / not installed.
+**Views**: `MapView.vue` owns the Leaflet map imperatively (markers, route curve from `utils/geo.curvePoints`, geolocation via `useGeolocation`) and has a left "dock" (route panel with two `AddressInput`s, pick-on-map buttons, popular places, CTA) that hides when `OrderSheet.vue` (car class/type/extras form) opens. Pickup is auto-filled from geolocation when available (`source: 'me'`) but never required to come from it; both points can be typed, picked on the map, or dragged. Views are large single-file components with scoped styles; the color palette (cream `#fbf7ee`, green `#2f7d57`) and Inter font are set globally in `App.vue`. Layouts are tuned separately for mobile (breakpoint ~720px).
