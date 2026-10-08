@@ -487,8 +487,8 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
         </p>
 
         <div ref="heroActions" class="hero__actions">
-          <button class="btn btn--primary">Зареєструватись</button>
-          <button class="btn btn--secondary">Увійти</button>
+          <RouterLink to="/auth?mode=register" class="btn btn--primary">Зареєструватись</RouterLink>
+          <RouterLink to="/auth" class="btn btn--secondary">Увійти</RouterLink>
         </div>
       </div>
 
@@ -760,8 +760,8 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
           <p class="cta__text">Користуйтеся UhilTaxi та підбирайте авто саме під свої потреби.</p>
         </div>
         <div class="cta__actions">
-          <button class="cta__btn cta__btn--primary">Зареєструватись</button>
-          <button class="cta__btn cta__btn--ghost">Увійти</button>
+          <RouterLink to="/auth?mode=register" class="btn btn--primary">Зареєструватись</RouterLink>
+          <RouterLink to="/auth" class="btn btn--secondary">Увійти</RouterLink>
         </div>
       </div>
     </section>
@@ -882,6 +882,10 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     background-color 0.2s ease,
     border-color 0.2s ease;
   -webkit-tap-highlight-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 .btn--primary {
@@ -1318,6 +1322,10 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     border-color 0.2s ease,
     box-shadow 0.2s ease;
   -webkit-tap-highlight-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
 }
 
 .cta__btn--primary {
@@ -1559,7 +1567,7 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     font-size: 12px;
     white-space: normal;
   }
-  
+
   .about {
     padding: 36px 0 120px;
   }
@@ -1735,6 +1743,10 @@ const luggage = ['Великі валізи', 'Дитяче крісло', 'Ко
     font-weight: 600;
     box-shadow: 0 6px 16px rgba(47, 125, 87, 0.3);
     -webkit-tap-highlight-color: transparent;
+    display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
   }
 
   .bar-enter-active,
