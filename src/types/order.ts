@@ -1,39 +1,100 @@
-export const CAR_CLASSES = ['economy', 'comfort', 'business'] as const
-export type CarClass = (typeof CAR_CLASSES)[number]
+// Wire types mirror swagger.json (UhilTaxi.Api v1). View types below are what the UI works with
+// after responses are narrowed by utils/order.ts.
 
-export const CAR_TYPES = ['sedan', 'wagon', 'minivan', 'electric'] as const
-export type CarType = (typeof CAR_TYPES)[number]
-
-export const SEATS: Record<CarType, number> = {
-  sedan: 4,
-  wagon: 4,
-  minivan: 7,
-  electric: 4,
+export interface OrderLocationRequest {
+  address: string
+  lat: number
+  lng: number
 }
 
-export const MAX_PASSENGERS = 7
-
-export interface OrderExtras {
-  child_seat: boolean
-  pets: boolean
-  luggage: boolean
+export interface CreateOrderRequest {
+  tariff_id: number
+  pickup: OrderLocationRequest
+  destination: OrderLocationRequest
+  promocode: string | null
 }
 
-export interface OrderRequest extends OrderExtras {
-  pickup_address: string
-  pickup_lat: number
-  pickup_lng: number
-  destination_address: string
-  destination_lat: number
-  destination_lng: number
-  passengers: number
-  car_class: CarClass
-  car_type: CarType
-  comment: string | null
+export interface CancelOrderRequest {
+  reason: string | null
 }
 
-export interface OrderResponse {
-  id?: number | string
-  status?: string | null
-  [key: string]: unknown
+export interface CompleteTripRequest {
+  distance_km: number | null
+}
+
+export interface StartTripRequest {
+  shift_id: number
+}
+
+export interface Paged<T> {
+  data: T[]
+  page: number
+  pages: number
+  total: number
+}
+
+export type OrderStage = 'searching' | 'accepted' | 'arrived' | 'started' | 'completed' | 'cancelled'
+
+export interface Tariff {
+  id: number
+  name: string
+  serviceClass: string
+  baseFare: number
+  ratePerKm: number
+  ratePerMin: number
+}
+
+export interface Estimate {
+  distanceKm: number
+  durationMin: number
+  baseAmount: number
+  discountAmount: number
+  fare: number
+}
+
+export interface Person {
+  id: number | null
+  firstName: string
+  lastName: string
+  phone: string | null
+  rating: number | null
+  ratingCount: number
+  car: string | null
+  plate: string | null
+}
+
+export interface OrderPoint {
+  address: string
+  lat: number
+  lng: number
+}
+
+export interface OrderView {
+  id: number
+  stage: OrderStage
+  status: string
+  clientId: number | null
+  tariffId: number | null
+  driverId: number | null
+  pickup: OrderPoint
+  destination: OrderPoint
+  distanceKm: number | null
+  durationMin: number | null
+  fare: number | null
+  cancellationReason: string | null
+  createdAt: string | null
+  acceptedAt: string | null
+  driver: Person | null
+  client: Person | null
+}
+
+export interface TripView {
+  id: number
+  orderId: number | null
+  distanceKm: number | null
+  durationMin: number | null
+  fare: number | null
+  tariffName: string | null
+  startedAt: string | null
+  endedAt: string | null
 }

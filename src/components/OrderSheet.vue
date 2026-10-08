@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import AddressInput from '@/components/AddressInput.vue'
 import { ApiError } from '@/api/http'
-import { COMMENT_MAX, ordersApi, prepareOrder } from '@/api/orders'
-import { useAuth } from '@/composables/useAuth'
-import { distanceMeters, formatDistance } from '@/utils/geo'
-import { MAX_PASSENGERS, SEATS, type CarClass, type CarType, type OrderExtras } from '@/types/order'
+import { PROMO_MAX, normalizePromo, ordersApi, prepareOrder, validatePromo } from '@/api/orders'
+import { formatFare, formatKm } from '@/utils/order'
+import type { CreateOrderRequest, Estimate, OrderView, Tariff } from '@/types/order'
 import type { Place } from '@/types/geo'
+
+const ESTIMATE_DEBOUNCE_MS = 400
 
 const props = defineProps<{
   open: boolean
@@ -18,44 +18,34 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   close: []
-  done: []
+  created: [order: OrderView, request: CreateOrderRequest]
   'update:pickup': [value: Place | null]
   'update:destination': [value: Place | null]
 }>()
 
-const router = useRouter()
-const { token, logout } = useAuth()
+const CLASS_TEXT: Record<string, string> = {
+  economy: 'Щоденні поїздки',
+  standard: 'Щоденні поїздки',
+  comfort: 'Більше простору',
+  business: 'Преміум авто',
+  premium: 'Преміум авто',
+  minivan: 'До 7 пасажирів',
+}
 
-const classes: { id: CarClass; name: string; text: string }[] = [
-  { id: 'economy', name: 'Economy', text: 'Щоденні поїздки' },
-  { id: 'comfort', name: 'Comfort', text: 'Більше простору' },
-  { id: 'business', name: 'Business', text: 'Преміум авто' },
-]
-
-const types: { id: CarType; name: string }[] = [
-  { id: 'sedan', name: 'Седан' },
-  { id: 'wagon', name: 'Універсал' },
-  { id: 'minivan', name: 'Мінівен' },
-  { id: 'electric', name: 'Електро' },
-]
-
-const extrasList: { id: keyof OrderExtras; name: string }[] = [
-  { id: 'child_seat', name: 'Дитяче крісло' },
-  { id: 'pets', name: 'З твариною' },
-  { id: 'luggage', name: 'Великий багаж' },
-]
-
-const carClass = ref<CarClass>('comfort')
-const carType = ref<CarType>('sedan')
-const passengers = ref(1)
-const extras = reactive<OrderExtras>({ child_seat: false, pets: false, luggage: false })
-const comment = ref('')
-const state = ref<'form' | 'sending' | 'success'>('form')
+const tariffs = ref<Tariff[]>([])
+const tariffsState = ref<'loading' | 'ready' | 'error'>('loading')
+const tariffId = ref<number | null>(null)
+const estimates = ref<Record<number, Estimate | 'loading' | 'error'>>({})
+const promoInput = ref('')
+const promo = ref('')
+const promoOpen = ref(false)
+const promoError = ref('')
+const sending = ref(false)
 const error = ref('')
-const orderId = ref('')
 const openCount = ref(0)
-const passengerDir = ref<'up' | 'down'>('up')
-const autoSwitched = ref(false)
+
+let estimateTimer = 0
+let estimateRun = 0
 
 const pickupModel = computed({
   get: () => props.pickup,
@@ -67,66 +57,118 @@ const destinationModel = computed({
   set: (value) => emit('update:destination', value),
 })
 
-const distance = computed(() => {
-  if (!props.pickup || !props.destination || props.pickup.pending || props.destination.pending) return null
-  return distanceMeters(props.pickup, props.destination)
+const routeReady = computed(() => !!props.pickup && !!props.destination && !props.pickup.pending && !props.destination.pending)
+const selected = computed(() => tariffs.value.find((item) => item.id === tariffId.value) ?? null)
+const selectedEstimate = computed(() => {
+  const value = tariffId.value === null ? undefined : estimates.value[tariffId.value]
+  return typeof value === 'object' ? value : null
 })
-
-const canSubmit = computed(
-  () =>
-    state.value === 'form' &&
-    !!props.pickup &&
-    !!props.destination &&
-    !props.pickup.pending &&
-    !props.destination.pending,
-)
-
+const canSubmit = computed(() => routeReady.value && !!selected.value && !sending.value)
 const canUseMe = computed(() => !!props.myPlace && props.pickup?.source !== 'me')
+
+function tierOf(tariff: Tariff, index: number) {
+  if (/business|premium|vip/.test(tariff.serviceClass)) return 2
+  if (/comfort/.test(tariff.serviceClass)) return 1
+  if (/econom|standard/.test(tariff.serviceClass)) return 0
+  return Math.min(2, index)
+}
+
+async function loadTariffs() {
+  tariffsState.value = 'loading'
+  try {
+    const list = await ordersApi.tariffs()
+    tariffs.value = list
+    tariffsState.value = list.length ? 'ready' : 'error'
+    if (tariffId.value === null || !list.some((item) => item.id === tariffId.value)) {
+      tariffId.value = (list.find((item) => /comfort/.test(item.serviceClass)) ?? list[0])?.id ?? null
+    }
+    queueEstimate()
+  } catch {
+    tariffsState.value = 'error'
+  }
+}
+
+function draftFor(id: number, code: string) {
+  return prepareOrder({ pickup: props.pickup, destination: props.destination, tariffId: id, promocode: code })
+}
+
+function queueEstimate() {
+  clearTimeout(estimateTimer)
+  if (!routeReady.value || !tariffs.value.length) {
+    estimates.value = {}
+    return
+  }
+  estimateTimer = window.setTimeout(runEstimate, ESTIMATE_DEBOUNCE_MS)
+}
+
+async function runEstimate() {
+  const run = ++estimateRun
+  const code = promo.value
+  estimates.value = Object.fromEntries(tariffs.value.map((item) => [item.id, 'loading']))
+
+  await Promise.all(
+    tariffs.value.map(async (tariff) => {
+      const draft = draftFor(tariff.id, code)
+      let result: Estimate | 'error' = 'error'
+      if ('data' in draft) {
+        try {
+          result = await ordersApi.estimate(draft.data)
+        } catch (e) {
+          if (code && e instanceof ApiError && e.status >= 400 && e.status < 500 && run === estimateRun) {
+            promoError.value = e.message
+            promo.value = ''
+            queueEstimate()
+          }
+        }
+      }
+      if (run === estimateRun) estimates.value = { ...estimates.value, [tariff.id]: result }
+    }),
+  )
+}
+
+function applyPromo() {
+  promoError.value = validatePromo(promoInput.value) ?? ''
+  if (promoError.value) return
+  promo.value = normalizePromo(promoInput.value)
+  promoInput.value = promo.value
+  queueEstimate()
+}
+
+function removePromo() {
+  promo.value = ''
+  promoInput.value = ''
+  promoError.value = ''
+  queueEstimate()
+}
 
 watch(
   () => props.open,
   (open) => {
-    if (open) {
-      openCount.value++
-      if (state.value === 'success') reset()
-    }
+    if (!open) return
+    openCount.value++
+    error.value = ''
+    if (tariffsState.value !== 'ready') loadTariffs()
+    else queueEstimate()
   },
 )
-
-watch(passengers, (count, previous) => {
-  passengerDir.value = count > previous ? 'up' : 'down'
-  if (count > SEATS[carType.value]) {
-    carType.value = 'minivan'
-    autoSwitched.value = true
-  }
-})
-
-watch(carType, () => {
-  if (carType.value !== 'minivan') autoSwitched.value = false
-})
 
 watch(
   () => [props.pickup, props.destination],
   () => {
-    if (error.value) error.value = ''
+    error.value = ''
+    if (props.open) queueEstimate()
   },
 )
 
 function onKey(event: KeyboardEvent) {
-  if (event.key === 'Escape' && props.open && state.value !== 'sending') emit('close')
+  if (event.key === 'Escape' && props.open && !sending.value) emit('close')
 }
 
 window.addEventListener('keydown', onKey)
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
-
-function changePassengers(delta: number) {
-  passengers.value = Math.min(MAX_PASSENGERS, Math.max(1, passengers.value + delta))
-}
-
-function selectType(type: CarType) {
-  if (SEATS[type] < passengers.value) return
-  carType.value = type
-}
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey)
+  clearTimeout(estimateTimer)
+})
 
 function swap() {
   const from = props.pickup
@@ -138,291 +180,191 @@ function useMe() {
   if (props.myPlace) emit('update:pickup', { ...props.myPlace })
 }
 
-function reset() {
-  state.value = 'form'
-  error.value = ''
-  orderId.value = ''
-  comment.value = ''
-}
-
-function safeId(value: unknown) {
-  if (typeof value !== 'number' && typeof value !== 'string') return ''
-  const id = String(value)
-  return id.length <= 24 && /^[\w-]+$/.test(id) ? id : ''
-}
-
 async function submit() {
-  if (!canSubmit.value) return
+  if (!canSubmit.value || tariffId.value === null) return
   error.value = ''
 
-  const prepared = prepareOrder({
-    pickup: props.pickup,
-    destination: props.destination,
-    passengers: passengers.value,
-    carClass: carClass.value,
-    carType: carType.value,
-    extras: { ...extras },
-    comment: comment.value,
-  })
-
+  const prepared = draftFor(tariffId.value, promo.value)
   if ('error' in prepared) {
     error.value = prepared.error
     return
   }
 
-  state.value = 'sending'
-
+  sending.value = true
   try {
-    const response = await ordersApi.create(prepared.data, token.value)
-    orderId.value = safeId(response?.id)
-    state.value = 'success'
+    const order = await ordersApi.create(prepared.data)
+    emit('created', order, prepared.data)
   } catch (e) {
-    state.value = 'form'
-    if (e instanceof ApiError && e.status === 401) {
-      logout()
-      await router.replace({ name: 'auth', query: { redirect: '/app' } })
-      return
-    }
     error.value = e instanceof ApiError ? e.message : 'Не вдалося створити замовлення. Спробуйте ще раз'
+  } finally {
+    sending.value = false
   }
-}
-
-function finish() {
-  reset()
-  emit('done')
 }
 </script>
 
 <template>
   <Transition name="sheet">
-    <aside v-show="open" class="sheet" :class="{ 'sheet--success': state === 'success' }" aria-label="Нове замовлення">
+    <aside v-show="open" class="sheet" aria-label="Нове замовлення">
       <div class="sheet__grip" aria-hidden="true"></div>
 
-      <Transition name="fade" mode="out-in">
-        <div v-if="state !== 'success'" :key="`form-${openCount}`" class="sheet__inner">
-          <header class="sheet__head item" style="--i: 0">
-            <div>
-              <h2 class="sheet__title">Нове замовлення</h2>
-              <p class="sheet__sub">Оберіть маршрут і авто</p>
+      <div :key="`form-${openCount}`" class="sheet__inner">
+        <header class="sheet__head item" style="--i: 0">
+          <div>
+            <h2 class="sheet__title">Оберіть тариф</h2>
+            <p class="sheet__sub">Ціна фіксується в момент замовлення</p>
+          </div>
+          <button type="button" class="icon-btn" aria-label="Закрити" :disabled="sending" @click="emit('close')">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </header>
+
+        <div class="sheet__scroll">
+          <section class="block item" style="--i: 1">
+            <div class="block__head">
+              <h3 class="block__title">Маршрут</h3>
+              <button v-if="canUseMe" type="button" class="link-btn" @click="useMe">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+                </svg>
+                Звідси
+              </button>
             </div>
-            <button type="button" class="icon-btn" aria-label="Закрити" :disabled="state === 'sending'" @click="emit('close')">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-                <path d="M6 6l12 12M18 6L6 18" />
-              </svg>
-            </button>
-          </header>
 
-          <div class="sheet__scroll">
-            <section class="block item" style="--i: 1">
-              <div class="block__head">
-                <h3 class="block__title">Маршрут</h3>
-                <button v-if="canUseMe" type="button" class="link-btn" @click="useMe">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-                    <circle cx="12" cy="12" r="3" />
-                    <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
-                  </svg>
-                  Звідси
-                </button>
-              </div>
+            <div class="route">
+              <AddressInput v-model="pickupModel" input-id="order-from" variant="from" label="Звідки" placeholder="Адреса посадки" />
+              <button type="button" class="route__swap" aria-label="Поміняти місцями" @click="swap">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3" />
+                </svg>
+              </button>
+              <AddressInput v-model="destinationModel" input-id="order-to" variant="to" label="Куди" placeholder="Куди їдемо?" />
+            </div>
 
-              <div class="route">
-                <AddressInput
-                  v-model="pickupModel"
-                  input-id="order-from"
-                  variant="from"
-                  label="Звідки"
-                  placeholder="Адреса посадки"
-                />
-                <button type="button" class="route__swap" aria-label="Поміняти місцями" @click="swap">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3" />
-                  </svg>
-                </button>
-                <AddressInput
-                  v-model="destinationModel"
-                  input-id="order-to"
-                  variant="to"
-                  label="Куди"
-                  placeholder="Куди їдемо?"
-                />
-              </div>
-
-              <Transition name="fade">
-                <p v-if="distance !== null" class="route__meta">
-                  <span class="route__dot"></span>
-                  ≈ {{ formatDistance(distance) }} по прямій
-                </p>
-              </Transition>
-            </section>
-
-            <section class="block item" style="--i: 2">
-              <h3 class="block__title">Клас авто</h3>
-              <div class="classes">
-                <button
-                  v-for="item in classes"
-                  :key="item.id"
-                  type="button"
-                  class="class-card"
-                  :class="{ 'class-card--active': carClass === item.id }"
-                  :aria-pressed="carClass === item.id"
-                  @click="carClass = item.id"
-                >
-                  <svg class="class-card__icon" viewBox="0 0 48 24" aria-hidden="true">
-                    <path
-                      d="M6 17v-4.5l5-6.5h22l7 6.5 3 1.5V17"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2.2"
-                      stroke-linejoin="round"
-                    />
-                    <circle cx="14" cy="18" r="3.2" fill="currentColor" />
-                    <circle cx="35" cy="18" r="3.2" fill="currentColor" />
-                    <path v-if="item.id !== 'economy'" d="M14 8h7v4.5h-9z" fill="currentColor" opacity="0.35" />
-                    <path v-if="item.id === 'business'" d="M24 8h8l4 4.5H24z" fill="currentColor" opacity="0.35" />
-                  </svg>
-                  <span class="class-card__name">{{ item.name }}</span>
-                  <span class="class-card__text">{{ item.text }}</span>
-                  <span class="class-card__check" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-                      <path d="M5 12.5l4.5 4.5L19 7.5" />
-                    </svg>
-                  </span>
-                </button>
-              </div>
-            </section>
-
-            <section class="block item" style="--i: 3">
-              <div class="block__head">
-                <h3 class="block__title">Тип авто</h3>
-                <Transition name="fade">
-                  <span v-if="autoSwitched" class="block__hint">Для {{ passengers }} пасажирів — мінівен</span>
-                </Transition>
-              </div>
-              <div class="segments" role="radiogroup">
-                <button
-                  v-for="item in types"
-                  :key="item.id"
-                  type="button"
-                  role="radio"
-                  class="segment"
-                  :class="{ 'segment--active': carType === item.id }"
-                  :aria-checked="carType === item.id"
-                  :disabled="SEATS[item.id] < passengers"
-                  @click="selectType(item.id)"
-                >
-                  {{ item.name }}
-                </button>
-              </div>
-            </section>
-
-            <section class="block block--row item" style="--i: 4">
-              <div>
-                <h3 class="block__title">Пасажири</h3>
-                <p class="block__text">До {{ SEATS[carType] }} у цьому авто</p>
-              </div>
-              <div class="stepper">
-                <button
-                  type="button"
-                  class="stepper__btn"
-                  aria-label="Менше пасажирів"
-                  :disabled="passengers <= 1"
-                  @click="changePassengers(-1)"
-                >
-                  −
-                </button>
-                <span class="stepper__value" aria-live="polite">
-                  <Transition :name="`num-${passengerDir}`" mode="out-in">
-                    <span :key="passengers">{{ passengers }}</span>
-                  </Transition>
-                </span>
-                <button
-                  type="button"
-                  class="stepper__btn"
-                  aria-label="Більше пасажирів"
-                  :disabled="passengers >= MAX_PASSENGERS"
-                  @click="changePassengers(1)"
-                >
-                  +
-                </button>
-              </div>
-            </section>
-
-            <section class="block item" style="--i: 5">
-              <h3 class="block__title">Додатково</h3>
-              <div class="chips">
-                <button
-                  v-for="item in extrasList"
-                  :key="item.id"
-                  type="button"
-                  class="chip"
-                  :class="{ 'chip--active': extras[item.id] }"
-                  :aria-pressed="extras[item.id]"
-                  @click="extras[item.id] = !extras[item.id]"
-                >
-                  <span class="chip__tick" aria-hidden="true"></span>
-                  {{ item.name }}
-                </button>
-              </div>
-            </section>
-
-            <section class="block item" style="--i: 6">
-              <label class="block__title" for="order-comment">Коментар водію</label>
-              <div class="comment">
-                <textarea
-                  id="order-comment"
-                  v-model="comment"
-                  class="comment__input"
-                  rows="2"
-                  :maxlength="COMMENT_MAX"
-                  placeholder="Під'їзд, поверх, побажання…"
-                  spellcheck="true"
-                ></textarea>
-                <span class="comment__count">{{ comment.length }}/{{ COMMENT_MAX }}</span>
-              </div>
-            </section>
-          </div>
-
-          <footer class="sheet__foot item" style="--i: 7">
-            <Transition name="alert">
-              <p v-if="error" class="alert" role="alert">{{ error }}</p>
+            <Transition name="fade">
+              <p v-if="selectedEstimate" class="route__meta">
+                <span class="route__dot"></span>
+                {{ formatKm(selectedEstimate.distanceKm) }} · ≈ {{ selectedEstimate.durationMin }} хв у дорозі
+              </p>
             </Transition>
-            <button type="button" class="next" :disabled="!canSubmit" :class="{ 'next--sending': state === 'sending' }" @click="submit">
-              <span class="next__shine"></span>
-              <Transition name="fade" mode="out-in">
-                <span v-if="state === 'sending'" key="sending" class="next__content">
-                  <span class="next__spinner"></span>
-                  Надсилаємо…
+          </section>
+
+          <section class="block item" style="--i: 2">
+            <h3 class="block__title">Тариф</h3>
+
+            <div v-if="tariffsState === 'loading'" class="tariffs">
+              <span v-for="n in 3" :key="n" class="tariff tariff--skeleton"></span>
+            </div>
+
+            <div v-else-if="tariffsState === 'error'" class="empty">
+              <p>Не вдалося завантажити тарифи</p>
+              <button type="button" class="link-btn" @click="loadTariffs">Спробувати ще раз</button>
+            </div>
+
+            <div v-else class="tariffs" role="radiogroup" aria-label="Тариф">
+              <button
+                v-for="(item, index) in tariffs"
+                :key="item.id"
+                type="button"
+                role="radio"
+                class="tariff"
+                :class="{ 'tariff--active': tariffId === item.id }"
+                :aria-checked="tariffId === item.id"
+                :style="{ '--i': index }"
+                @click="tariffId = item.id"
+              >
+                <svg class="tariff__icon" viewBox="0 0 48 24" aria-hidden="true">
+                  <path d="M6 17v-4.5l5-6.5h22l7 6.5 3 1.5V17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" />
+                  <circle cx="14" cy="18" r="3.2" fill="currentColor" />
+                  <circle cx="35" cy="18" r="3.2" fill="currentColor" />
+                  <path v-if="tierOf(item, index) >= 1" d="M14 8h7v4.5h-9z" fill="currentColor" opacity="0.35" />
+                  <path v-if="tierOf(item, index) >= 2" d="M24 8h8l4 4.5H24z" fill="currentColor" opacity="0.35" />
+                </svg>
+                <span class="tariff__name">{{ item.name }}</span>
+                <span class="tariff__text">{{ CLASS_TEXT[item.serviceClass] ?? `від ${formatFare(item.baseFare)}` }}</span>
+                <span class="tariff__price">
+                  <span v-if="estimates[item.id] === 'loading'" class="shimmer"></span>
+                  <template v-else-if="typeof estimates[item.id] === 'object'">
+                    {{ formatFare((estimates[item.id] as Estimate).fare) }}
+                  </template>
+                  <template v-else-if="!routeReady">—</template>
+                  <template v-else>від {{ formatFare(item.baseFare) }}</template>
                 </span>
-                <span v-else key="idle" class="next__content">
-                  Далі
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M5 12h14M13 6l6 6-6 6" />
+                <span class="tariff__check" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M5 12.5l4.5 4.5L19 7.5" />
                   </svg>
                 </span>
-              </Transition>
+              </button>
+            </div>
+          </section>
+
+          <section class="block item" style="--i: 3">
+            <button v-if="!promoOpen && !promo" type="button" class="promo-toggle" @click="promoOpen = true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 12V8a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v4a2 2 0 0 1 0 4v0a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v0a2 2 0 0 1 0-4Z" />
+                <path d="M10 9l4 6M10 15h.01M14 9h.01" />
+              </svg>
+              Є промокод?
             </button>
-          </footer>
+
+            <div v-else-if="promo" class="promo-applied">
+              <span class="promo-applied__code">{{ promo }}</span>
+              <span v-if="selectedEstimate?.discountAmount" class="promo-applied__save">
+                −{{ formatFare(selectedEstimate.discountAmount) }}
+              </span>
+              <button type="button" class="promo-applied__remove" aria-label="Прибрати промокод" @click="removePromo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round">
+                  <path d="M6 6l12 12M18 6L6 18" />
+                </svg>
+              </button>
+            </div>
+
+            <form v-else class="promo" @submit.prevent="applyPromo">
+              <label class="sr-only" for="order-promo">Промокод</label>
+              <input
+                id="order-promo"
+                v-model="promoInput"
+                class="promo__input"
+                :class="{ 'promo__input--invalid': promoError }"
+                :maxlength="PROMO_MAX"
+                autocomplete="off"
+                autocapitalize="characters"
+                spellcheck="false"
+                placeholder="Промокод"
+              />
+              <button type="submit" class="promo__btn" :disabled="!promoInput.trim()">Застосувати</button>
+            </form>
+            <Transition name="fade">
+              <p v-if="promoError" class="promo__error">{{ promoError }}</p>
+            </Transition>
+          </section>
         </div>
 
-        <div v-else key="success" class="success">
-          <div class="radar" aria-hidden="true">
-            <span class="radar__ring"></span>
-            <span class="radar__ring"></span>
-            <span class="radar__ring"></span>
-            <span class="radar__core">
-              <svg viewBox="0 0 48 24">
-                <path d="M6 17v-4.5l5-6.5h22l7 6.5 3 1.5V17" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linejoin="round" />
-                <circle cx="14" cy="18" r="3.2" fill="currentColor" />
-                <circle cx="35" cy="18" r="3.2" fill="currentColor" />
-              </svg>
-            </span>
-          </div>
-          <h2 class="success__title">Шукаємо водія</h2>
-          <p class="success__text">Замовлення прийнято. Щойно водій погодиться, ви побачите його тут.</p>
-          <p v-if="orderId" class="success__id">Замовлення № {{ orderId }}</p>
-          <button type="button" class="next next--light" @click="finish">Готово</button>
-        </div>
-      </Transition>
+        <footer class="sheet__foot item" style="--i: 4">
+          <Transition name="alert">
+            <p v-if="error" class="alert" role="alert">{{ error }}</p>
+          </Transition>
+          <button type="button" class="next" :disabled="!canSubmit" :class="{ 'next--sending': sending }" @click="submit">
+            <span class="next__shine"></span>
+            <Transition name="fade" mode="out-in">
+              <span v-if="sending" key="sending" class="next__content">
+                <span class="next__spinner"></span>
+                Надсилаємо…
+              </span>
+              <span v-else key="idle" class="next__content">
+                Замовити
+                <template v-if="selectedEstimate">· {{ formatFare(selectedEstimate.fare) }}</template>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M5 12h14M13 6l6 6-6 6" />
+                </svg>
+              </span>
+            </Transition>
+          </button>
+        </footer>
+      </div>
     </aside>
   </Transition>
 </template>
@@ -527,13 +469,6 @@ function finish() {
   border-bottom: none;
 }
 
-.block--row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 16px;
-}
-
 .block__head {
   display: flex;
   justify-content: space-between;
@@ -552,22 +487,6 @@ function finish() {
   font-size: 14px;
   font-weight: 700;
   color: #2b2b26;
-}
-
-.block--row .block__title {
-  margin-bottom: 2px;
-}
-
-.block__text {
-  margin: 0;
-  font-size: 13px;
-  color: #8a8578;
-}
-
-.block__hint {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: #2f7d57;
 }
 
 .link-btn {
@@ -608,21 +527,21 @@ function finish() {
   top: 36px;
   bottom: 36px;
   left: 22px;
+  z-index: 1;
   width: 2px;
   background: repeating-linear-gradient(#cfc6b2 0 4px, transparent 4px 8px);
-  z-index: 1;
   pointer-events: none;
 }
 
 .route__swap {
   position: absolute;
   top: 50%;
-  right: 12px;
+  right: 52px;
   z-index: 2;
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
   border: 1.5px solid #e6dfcf;
   border-radius: 50%;
   background: #fffdf8;
@@ -642,8 +561,8 @@ function finish() {
 }
 
 .route__swap svg {
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
 }
 
 .route__meta {
@@ -664,18 +583,19 @@ function finish() {
   animation: pulse 2s infinite;
 }
 
-.classes {
+.tariffs {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
   gap: 10px;
 }
 
-.class-card {
+.tariff {
   position: relative;
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+  min-height: 136px;
   padding: 14px 12px 12px;
   border: 1.5px solid #e6dfcf;
   border-radius: 16px;
@@ -684,6 +604,7 @@ function finish() {
   font-family: inherit;
   text-align: left;
   cursor: pointer;
+  animation: item-in 0.4s calc(var(--i, 0) * 60ms) var(--ease-out) backwards;
   transition:
     border-color 0.2s ease,
     background-color 0.2s ease,
@@ -692,42 +613,76 @@ function finish() {
     box-shadow 0.25s ease;
 }
 
-.class-card:hover {
+.tariff:hover {
   transform: translateY(-2px);
   border-color: #d6cdb8;
 }
 
-.class-card--active {
+.tariff--active {
   border-color: #2f7d57;
   background: #ffffff;
   color: #2f7d57;
   box-shadow: 0 10px 24px rgba(47, 125, 87, 0.14);
 }
 
-.class-card__icon {
+.tariff--skeleton {
+  border-color: transparent;
+  background: linear-gradient(90deg, #f1ebdd 25%, #f8f4ea 50%, #f1ebdd 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.1s linear infinite;
+  cursor: default;
+}
+
+.tariff__icon {
   width: 46px;
   height: 24px;
   margin-bottom: 8px;
   transition: transform 0.35s var(--ease-out);
 }
 
-.class-card--active .class-card__icon {
+.tariff--active .tariff__icon {
   transform: translateX(4px);
 }
 
-.class-card__name {
+.tariff__name {
   font-size: 14px;
   font-weight: 700;
   color: #2b2b26;
 }
 
-.class-card__text {
+.tariff__text {
   font-size: 11.5px;
   line-height: 1.35;
   color: #8a8578;
 }
 
-.class-card__check {
+.tariff__price {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  margin-top: auto;
+  padding-top: 8px;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: #2b2b26;
+}
+
+.tariff--active .tariff__price {
+  color: #2f7d57;
+}
+
+.shimmer {
+  display: block;
+  width: 56px;
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #f1ebdd 25%, #f8f4ea 50%, #f1ebdd 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.1s linear infinite;
+}
+
+.tariff__check {
   position: absolute;
   top: 10px;
   right: 10px;
@@ -745,210 +700,171 @@ function finish() {
     transform 0.35s cubic-bezier(0.34, 1.6, 0.5, 1);
 }
 
-.class-card__check svg {
+.tariff__check svg {
   width: 12px;
   height: 12px;
 }
 
-.class-card--active .class-card__check {
+.tariff--active .tariff__check {
   opacity: 1;
   transform: scale(1);
 }
 
-.segments {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 4px;
-  padding: 4px;
-  border-radius: 14px;
-  background: #f1ebdd;
-}
-
-.segment {
-  padding: 10px 4px;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: #6b675c;
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    background-color 0.25s ease,
-    color 0.2s ease,
-    box-shadow 0.25s ease,
-    transform 0.15s ease;
-}
-
-.segment:active:not(:disabled) {
-  transform: scale(0.95);
-}
-
-.segment--active {
-  background: #fffdf8;
-  color: #2b2b26;
-  box-shadow: 0 4px 12px rgba(60, 50, 30, 0.1);
-}
-
-.segment:disabled {
-  color: #c4bcaa;
-  cursor: not-allowed;
-}
-
-.stepper {
+.empty {
   display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 4px;
-  padding: 4px;
+  gap: 12px;
+  padding: 14px;
   border-radius: 14px;
-  background: #f1ebdd;
+  background: #f7eedb;
+  color: #7a5a1e;
+  font-size: 13.5px;
 }
 
-.stepper__btn {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  border: none;
-  border-radius: 10px;
-  background: #fffdf8;
-  color: #2b2b26;
-  font-family: inherit;
-  font-size: 20px;
-  font-weight: 600;
-  cursor: pointer;
-  transition:
-    transform 0.15s ease,
-    opacity 0.2s ease;
+.empty p {
+  margin: 0;
 }
 
-.stepper__btn:active:not(:disabled) {
-  transform: scale(0.9);
-}
-
-.stepper__btn:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.stepper__value {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
-  overflow: hidden;
-  font-size: 17px;
-  font-weight: 700;
-  color: #2b2b26;
-}
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.chip {
+.promo-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 14px;
-  border: 1.5px solid #e6dfcf;
-  border-radius: 999px;
-  background: #fffdf8;
-  color: #4a473f;
-  font-family: inherit;
-  font-size: 13.5px;
-  font-weight: 500;
-  cursor: pointer;
-  transition:
-    border-color 0.2s ease,
-    background-color 0.2s ease,
-    color 0.2s ease,
-    transform 0.15s ease;
-}
-
-.chip:active {
-  transform: scale(0.96);
-}
-
-.chip__tick {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  border: 1.5px solid #cfc6b2;
-  border-radius: 5px;
-  transition:
-    background-color 0.2s ease,
-    border-color 0.2s ease;
-}
-
-.chip__tick::after {
-  content: '';
-  position: absolute;
-  top: 1px;
-  left: 4.5px;
-  width: 4px;
-  height: 8px;
-  border: solid #ffffff;
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg) scale(0);
-  transition: transform 0.25s cubic-bezier(0.34, 1.6, 0.5, 1);
-}
-
-.chip--active {
-  border-color: #2f7d57;
-  background: #e3efe7;
+  padding: 0;
+  border: none;
+  background: none;
   color: #2f7d57;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
-.chip--active .chip__tick {
-  border-color: #2f7d57;
-  background: #2f7d57;
+.promo-toggle svg {
+  width: 20px;
+  height: 20px;
 }
 
-.chip--active .chip__tick::after {
-  transform: rotate(45deg) scale(1);
+.promo {
+  display: flex;
+  gap: 8px;
+  animation: item-in 0.3s var(--ease-out) backwards;
 }
 
-.comment {
-  position: relative;
-}
-
-.comment__input {
-  width: 100%;
-  min-height: 64px;
-  padding: 12px 14px 24px;
+.promo__input {
+  flex: 1;
+  min-width: 0;
+  height: 46px;
+  padding: 0 14px;
   border: 1.5px solid #e6dfcf;
   border-radius: 14px;
   background: #fffdf8;
   color: #2b2b26;
   font-family: inherit;
   font-size: 15px;
-  line-height: 1.5;
-  resize: none;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   outline: none;
   transition:
     border-color 0.2s ease,
     box-shadow 0.25s ease;
 }
 
-.comment__input::placeholder {
+.promo__input::placeholder {
   color: #b5ae9f;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
-.comment__input:focus {
+.promo__input:focus {
   border-color: #2f7d57;
   box-shadow: 0 0 0 4px rgba(47, 125, 87, 0.12);
 }
 
-.comment__count {
+.promo__input--invalid {
+  border-color: #c2543f;
+}
+
+.promo__btn {
+  flex-shrink: 0;
+  padding: 0 16px;
+  border: none;
+  border-radius: 14px;
+  background: #2b2b26;
+  color: #fbf7ee;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.promo__btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.promo__error {
+  margin: 8px 0 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: #9f3a28;
+}
+
+.promo-applied {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 10px 10px 14px;
+  border: 1.5px dashed #2f7d57;
+  border-radius: 14px;
+  background: #e3efe7;
+}
+
+.promo-applied__code {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #2f7d57;
+}
+
+.promo-applied__save {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #2f7d57;
+  color: #fbf7ee;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.promo-applied__remove {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(47, 125, 87, 0.12);
+  color: #2f7d57;
+  cursor: pointer;
+}
+
+.promo-applied__remove svg {
+  width: 12px;
+  height: 12px;
+}
+
+.sr-only {
   position: absolute;
-  right: 12px;
-  bottom: 8px;
-  font-size: 11.5px;
-  color: #b5ae9f;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .sheet__foot {
@@ -1016,11 +932,6 @@ function finish() {
   cursor: progress;
 }
 
-.next--light {
-  width: 100%;
-  margin-top: 8px;
-}
-
 .next__shine {
   position: absolute;
   inset: 0;
@@ -1035,7 +946,7 @@ function finish() {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 
 .next__content svg {
@@ -1055,93 +966,6 @@ function finish() {
   border-top-color: #fbf7ee;
   border-radius: 50%;
   animation: spin 0.7s linear infinite;
-}
-
-.success {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  padding: 40px 32px;
-  text-align: center;
-}
-
-.radar {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 180px;
-  height: 180px;
-  margin-bottom: 28px;
-}
-
-.radar__ring {
-  position: absolute;
-  inset: 0;
-  border: 2px solid rgba(47, 125, 87, 0.35);
-  border-radius: 50%;
-  animation: radar 2.4s ease-out infinite;
-}
-
-.radar__ring:nth-child(2) {
-  animation-delay: 0.8s;
-}
-
-.radar__ring:nth-child(3) {
-  animation-delay: 1.6s;
-}
-
-.radar__core {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 84px;
-  height: 84px;
-  border-radius: 50%;
-  background: #2f7d57;
-  color: #fbf7ee;
-  box-shadow: 0 16px 40px rgba(47, 125, 87, 0.4);
-  animation: core-in 0.7s cubic-bezier(0.34, 1.5, 0.5, 1) backwards;
-}
-
-.radar__core svg {
-  width: 44px;
-  height: 24px;
-  animation: drive 1.6s ease-in-out infinite;
-}
-
-.success__title {
-  margin: 0 0 10px;
-  font-size: 26px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  color: #2b2b26;
-  animation: item-in 0.5s 0.2s var(--ease-out) backwards;
-}
-
-.success__text {
-  max-width: 300px;
-  margin: 0 0 12px;
-  font-size: 15px;
-  line-height: 1.6;
-  color: #6b675c;
-  animation: item-in 0.5s 0.3s var(--ease-out) backwards;
-}
-
-.success__id {
-  margin: 0 0 20px;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: #e3efe7;
-  color: #2f7d57;
-  font-size: 13px;
-  font-weight: 600;
-  animation: item-in 0.5s 0.38s var(--ease-out) backwards;
-}
-
-.success .next {
-  animation: item-in 0.5s 0.45s var(--ease-out) backwards;
 }
 
 .sheet-enter-active {
@@ -1191,27 +1015,6 @@ function finish() {
   opacity: 0;
 }
 
-.num-up-enter-active,
-.num-up-leave-active,
-.num-down-enter-active,
-.num-down-leave-active {
-  transition:
-    transform 0.18s var(--ease-out),
-    opacity 0.18s ease;
-}
-
-.num-up-enter-from,
-.num-down-leave-to {
-  opacity: 0;
-  transform: translateY(12px);
-}
-
-.num-up-leave-to,
-.num-down-enter-from {
-  opacity: 0;
-  transform: translateY(-12px);
-}
-
 @keyframes item-in {
   from {
     opacity: 0;
@@ -1219,31 +1022,9 @@ function finish() {
   }
 }
 
-@keyframes radar {
-  from {
-    opacity: 1;
-    transform: scale(0.45);
-  }
+@keyframes shimmer {
   to {
-    opacity: 0;
-    transform: scale(1.15);
-  }
-}
-
-@keyframes core-in {
-  from {
-    opacity: 0;
-    transform: scale(0.3);
-  }
-}
-
-@keyframes drive {
-  0%,
-  100% {
-    transform: translateX(-3px);
-  }
-  50% {
-    transform: translateX(3px);
+    background-position: -200% 0;
   }
 }
 
@@ -1302,25 +1083,18 @@ function finish() {
     padding: 12px 18px calc(16px + env(safe-area-inset-bottom));
   }
 
-  .classes {
+  .tariffs {
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
     gap: 8px;
   }
 
-  .class-card {
+  .tariff {
+    min-height: 118px;
     padding: 12px 10px 10px;
   }
 
-  .class-card__text {
+  .tariff__text {
     display: none;
-  }
-
-  .segment {
-    font-size: 12.5px;
-  }
-
-  .success {
-    min-height: 420px;
-    padding: 32px 24px calc(24px + env(safe-area-inset-bottom));
   }
 
   .sheet-enter-from,
@@ -1331,7 +1105,7 @@ function finish() {
 }
 
 @media (hover: none) {
-  .class-card:hover,
+  .tariff:hover,
   .link-btn:hover,
   .next:hover:not(:disabled) {
     transform: none;
@@ -1343,10 +1117,6 @@ function finish() {
 
   .route__swap:hover {
     transform: translateY(-50%);
-  }
-
-  .route__swap:active {
-    transform: translateY(-50%) rotate(180deg);
   }
 }
 </style>

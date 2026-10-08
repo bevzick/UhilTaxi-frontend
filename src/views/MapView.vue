@@ -2,22 +2,21 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import L from 'leaflet'
-import 'leaflet/dist/leaflet.css'
 import AddressInput from '@/components/AddressInput.vue'
 import OrderSheet from '@/components/OrderSheet.vue'
+import RideStatus from '@/components/RideStatus.vue'
 import { isAbort, reverseGeocode } from '@/api/geocode'
 import { CITY, inCity } from '@/config/city'
+import { useActiveOrder } from '@/composables/useActiveOrder'
 import { useAuth } from '@/composables/useAuth'
 import { useGeolocation } from '@/composables/useGeolocation'
 import { coordsLabel, curvePoints, distanceMeters, formatDistance } from '@/utils/geo'
+import { RouteLayer, createCityMap, icons } from '@/utils/map'
 import type { Place } from '@/types/geo'
+import type { CreateOrderRequest, OrderView } from '@/types/order'
 
 type Target = 'pickup' | 'destination'
 
-const TILES_URL = import.meta.env.VITE_MAP_TILES_URL || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
-const ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>' +
-  (TILES_URL.includes('cartocdn') ? ' &copy; <a href="https://carto.com/attributions" target="_blank" rel="noopener">CARTO</a>' : '')
 const REGEOCODE_METERS = 60
 const ROAD_FACTOR = 1.35
 const CITY_SPEED_M_PER_MIN = 28_000 / 60
@@ -33,6 +32,7 @@ const QUICK_PLACES: { id: string; label: string; place: Place }[] = [
 const router = useRouter()
 const { user, logout } = useAuth()
 const geo = useGeolocation()
+const ride = useActiveOrder()
 
 const mapEl = ref<HTMLElement | null>(null)
 const panelEl = ref<HTMLElement | null>(null)
@@ -107,35 +107,13 @@ let meMarker: L.Marker | null = null
 let accuracyCircle: L.Circle | null = null
 let pickupMarker: L.Marker | null = null
 let destMarker: L.Marker | null = null
-let routeGlow: L.Polyline | null = null
-let routeLine: L.Polyline | null = null
+let route: RouteLayer | null = null
 let lastRouteKey = ''
 let lastGeocoded: { lat: number; lng: number } | null = null
 let meController: AbortController | null = null
 let toastTimer = 0
 let centeredOnMe = false
 const pointControllers: Record<Target, AbortController | null> = { pickup: null, destination: null }
-
-const meIcon = L.divIcon({
-  className: 'ut-icon',
-  html: '<div class="ut-me"><span class="ut-me__pulse"></span><span class="ut-me__dot"></span></div>',
-  iconSize: [28, 28],
-  iconAnchor: [14, 14],
-})
-
-const pickupIcon = L.divIcon({
-  className: 'ut-icon',
-  html: '<div class="ut-start"><span></span></div>',
-  iconSize: [26, 26],
-  iconAnchor: [13, 13],
-})
-
-const destIcon = L.divIcon({
-  className: 'ut-icon',
-  html: '<div class="ut-pin"><svg viewBox="0 0 36 46"><path d="M18 1C8.6 1 1 8.4 1 17.6 1 30 18 45 18 45s17-15 17-27.4C35 8.4 27.4 1 18 1Z"/><circle cx="18" cy="17" r="6.5"/></svg><span class="ut-pin__shadow"></span></div>',
-  iconSize: [36, 46],
-  iconAnchor: [18, 44],
-})
 
 function flash(message: string) {
   toast.value = message
@@ -148,9 +126,10 @@ const isDesktop = () => window.matchMedia('(min-width: 721px)').matches
 function fitRoute(points: L.LatLngExpression[]) {
   if (!map) return
   const bounds = L.latLngBounds(points)
+  const leftPanel = !sheetOpen.value
   if (isDesktop()) {
     map.flyToBounds(bounds, {
-      paddingTopLeft: [sheetOpen.value ? 80 : 470, 110],
+      paddingTopLeft: [leftPanel ? 470 : 80, 110],
       paddingBottomRight: [sheetOpen.value ? 480 : 90, 80],
       maxZoom: 16,
       duration: 0.9,
@@ -158,9 +137,10 @@ function fitRoute(points: L.LatLngExpression[]) {
     return
   }
   const panelBottom = panelEl.value?.getBoundingClientRect().bottom ?? 300
+  const bottomCard = sheetOpen.value || !!ride.order.value
   map.flyToBounds(bounds, {
-    paddingTopLeft: [40, sheetOpen.value ? 90 : panelBottom + 30],
-    paddingBottomRight: [40, sheetOpen.value ? Math.round(window.innerHeight * 0.6) : 110],
+    paddingTopLeft: [40, bottomCard ? 90 : panelBottom + 30],
+    paddingBottomRight: [40, bottomCard ? Math.round(window.innerHeight * 0.55) : 110],
     maxZoom: 16,
     duration: 0.9,
   })
@@ -172,28 +152,15 @@ function routePoints() {
 }
 
 function drawRoute() {
-  if (!map) return
-  routeGlow?.remove()
-  routeLine?.remove()
-  routeGlow = null
-  routeLine = null
+  if (!map || !route) return
+  route.clear()
 
-  const points = routePoints()
-  if (!points || !pickup.value || !destination.value) {
+  if (!pickup.value || !destination.value) {
     lastRouteKey = ''
     return
   }
 
-  routeGlow = L.polyline(points, { color: '#2f7d57', weight: 12, opacity: 0.16, lineCap: 'round', interactive: false }).addTo(map)
-  routeLine = L.polyline(points, {
-    className: 'ut-route',
-    color: '#2f7d57',
-    weight: 4,
-    dashArray: '1 11',
-    lineCap: 'round',
-    interactive: false,
-  }).addTo(map)
-
+  const points = route.draw(pickup.value, destination.value)
   const from = pickup.value
   const to = destination.value
   const key = `${from.lat.toFixed(5)},${from.lng.toFixed(5)}|${to.lat.toFixed(5)},${to.lng.toFixed(5)}`
@@ -230,6 +197,7 @@ async function resolvePoint(target: Target, lat: number, lng: number) {
 }
 
 function placeAt(target: Target, latlng: L.LatLng) {
+  if (ride.order.value) return
   if (!inCity(latlng.lat, latlng.lng)) {
     flash('Ми працюємо лише в межах Хмельницького')
     return
@@ -262,10 +230,23 @@ function openSheet() {
   sheetOpen.value = true
 }
 
-function onOrderDone() {
+function onOrderCreated(order: OrderView, request: CreateOrderRequest) {
+  ride.start(order, request)
+  sheetOpen.value = false
+}
+
+function onRideDone() {
+  ride.clear()
   sheetOpen.value = false
   destination.value = null
-  if (myPlace.value) pickup.value = { ...myPlace.value }
+  pickup.value = myPlace.value ? { ...myPlace.value } : null
+}
+
+function showOrderRoute(order: OrderView) {
+  const same = (place: Place | null, point: { lat: number; lng: number }) =>
+    !!place && place.lat === point.lat && place.lng === point.lng
+  if (!same(pickup.value, order.pickup)) pickup.value = { ...order.pickup, source: 'search' }
+  if (!same(destination.value, order.destination)) destination.value = { ...order.destination, source: 'search' }
 }
 
 async function updateMyPlace(lat: number, lng: number) {
@@ -278,7 +259,7 @@ async function updateMyPlace(lat: number, lng: number) {
   lastGeocoded = { lat, lng }
   const draft: Place = { lat, lng, address: '', source: 'me', pending: true }
   myPlace.value = draft
-  if (!pickup.value || pickup.value.source === 'me') pickup.value = draft
+  if (!ride.order.value && (!pickup.value || pickup.value.source === 'me')) pickup.value = draft
 
   meController?.abort()
   meController = new AbortController()
@@ -287,12 +268,12 @@ async function updateMyPlace(lat: number, lng: number) {
     const place = await reverseGeocode(lat, lng, meController.signal)
     const resolved: Place = { ...place, source: 'me' }
     myPlace.value = resolved
-    if (!pickup.value || pickup.value.source === 'me') pickup.value = resolved
+    if (!ride.order.value && (!pickup.value || pickup.value.source === 'me')) pickup.value = resolved
   } catch (error) {
     if (isAbort(error)) return
     const fallback: Place = { lat, lng, address: 'Моє місцезнаходження', source: 'me' }
     myPlace.value = fallback
-    if (!pickup.value || pickup.value.source === 'me') pickup.value = fallback
+    if (!ride.order.value && (!pickup.value || pickup.value.source === 'me')) pickup.value = fallback
   }
 }
 
@@ -352,7 +333,7 @@ watch(geo.position, (position) => {
   const latlng = L.latLng(lat, lng)
 
   if (!meMarker) {
-    meMarker = L.marker(latlng, { icon: meIcon, zIndexOffset: 1000, title: 'Ви тут', riseOnHover: true })
+    meMarker = L.marker(latlng, { icon: icons.me, zIndexOffset: 1000, title: 'Ви тут', riseOnHover: true })
       .addTo(map)
       .on('click', useMe)
     accuracyCircle = L.circle(latlng, {
@@ -386,7 +367,7 @@ watch(pickup, (place) => {
     pickupMarker = null
   } else if (!pickupMarker) {
     pickupMarker = bindDrag(
-      L.marker([place.lat, place.lng], { icon: pickupIcon, draggable: true, autoPan: true, zIndexOffset: 500, title: 'Звідки' }),
+      L.marker([place.lat, place.lng], { icon: icons.pickup, draggable: true, autoPan: true, zIndexOffset: 500, title: 'Звідки' }),
       'pickup',
     ).addTo(map)
   } else {
@@ -402,7 +383,7 @@ watch(destination, (place) => {
     destMarker = null
   } else if (!destMarker) {
     destMarker = bindDrag(
-      L.marker([place.lat, place.lng], { icon: destIcon, draggable: true, autoPan: true, zIndexOffset: 800, title: 'Куди' }),
+      L.marker([place.lat, place.lng], { icon: icons.destination, draggable: true, autoPan: true, zIndexOffset: 800, title: 'Куди' }),
       'destination',
     ).addTo(map)
   } else {
@@ -410,6 +391,17 @@ watch(destination, (place) => {
   }
   drawRoute()
 })
+
+watch(
+  () => ride.order.value?.id,
+  async () => {
+    if (!ride.order.value) return
+    showOrderRoute(ride.order.value)
+    await nextTick()
+    const points = routePoints()
+    if (points) fitRoute(points)
+  },
+)
 
 watch(sheetOpen, async () => {
   await nextTick()
@@ -420,27 +412,9 @@ watch(sheetOpen, async () => {
 onMounted(async () => {
   window.addEventListener('keydown', onKey)
   if (!mapEl.value) return
-  const { south, west, north, east } = CITY.bounds
-
-  map = L.map(mapEl.value, {
-    center: CITY.center,
-    zoom: 13,
-    minZoom: 12,
-    maxZoom: 18,
-    zoomControl: false,
-    doubleClickZoom: false,
-    zoomSnap: 0.5,
-    maxBounds: L.latLngBounds([south - 0.04, west - 0.06], [north + 0.04, east + 0.06]),
-    maxBoundsViscosity: 0.9,
-  })
-
-  L.tileLayer(TILES_URL, {
-    attribution: ATTRIBUTION,
-    subdomains: 'abcd',
-    maxZoom: 19,
-  }).addTo(map)
-
-  map.attributionControl.setPrefix(false)
+  map = createCityMap(mapEl.value)
+  route = new RouteLayer(map)
+  if (ride.order.value) showOrderRoute(ride.order.value)
   map.on('click', (event: L.LeafletMouseEvent) => {
     if (!picking.value) return
     placeAt(picking.value, event.latlng)
@@ -462,11 +436,15 @@ onBeforeUnmount(() => {
   pointControllers.destination?.abort()
   map?.remove()
   map = null
+  route = null
 })
 </script>
 
 <template>
-  <div class="page" :class="{ 'page--ready': ready, 'page--picking': picking, 'page--sheet': sheetOpen }">
+  <div
+    class="page"
+    :class="{ 'page--ready': ready, 'page--picking': picking, 'page--sheet': sheetOpen, 'page--ride': ride.order.value }"
+  >
     <div ref="mapEl" class="map" role="application" aria-label="Карта Хмельницького"></div>
     <div class="veil" aria-hidden="true"></div>
 
@@ -491,7 +469,7 @@ onBeforeUnmount(() => {
     </header>
 
     <Transition name="dock">
-      <div v-show="!sheetOpen" class="dock">
+      <div v-show="!sheetOpen && !ride.order.value" class="dock">
         <section ref="panelEl" class="panel" aria-label="Маршрут">
           <div class="panel__head">
             <p class="panel__eyebrow">{{ firstName ? `Привіт, ${firstName}` : 'Привіт' }}</p>
@@ -677,13 +655,30 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
+    <Transition name="dock">
+      <div v-if="ride.order.value" class="ride-dock">
+        <RideStatus
+          :order="ride.order.value"
+          :confirmed="ride.confirmed.value"
+          :needs-decision="ride.needsDecision.value"
+          :busy="ride.busy.value"
+          :error="ride.error.value"
+          :researching="ride.researching.value"
+          @confirm="ride.confirmDriver"
+          @reject="ride.rejectDriver"
+          @cancel="ride.cancel()"
+          @done="onRideDone"
+        />
+      </div>
+    </Transition>
+
     <OrderSheet
       v-model:pickup="pickup"
       v-model:destination="destination"
       :open="sheetOpen"
       :my-place="myPlace"
       @close="sheetOpen = false"
-      @done="onOrderDone"
+      @created="onOrderCreated"
     />
 
     <Transition name="toast">
@@ -717,6 +712,18 @@ onBeforeUnmount(() => {
 .page--ready .map {
   opacity: 1;
   transform: scale(1);
+}
+
+.ride-dock {
+  position: absolute;
+  top: 92px;
+  left: 16px;
+  z-index: 950;
+  width: 410px;
+  max-height: calc(100% - 116px);
+  overflow-y: auto;
+  border-radius: 26px;
+  scrollbar-width: none;
 }
 
 .page--picking .map {
@@ -1674,10 +1681,20 @@ onBeforeUnmount(() => {
     bottom: calc(84px + env(safe-area-inset-bottom));
   }
 
-  .controls--shifted {
+  .controls--shifted,
+  .page--ride .controls {
     transform: none;
     opacity: 0;
     pointer-events: none;
+  }
+
+  .ride-dock {
+    top: auto;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    width: auto;
+    max-height: 72dvh;
   }
 
   .ctrl {
@@ -1735,175 +1752,3 @@ onBeforeUnmount(() => {
 }
 </style>
 
-<style>
-.ut-icon {
-  background: transparent;
-  border: none;
-}
-
-.ut-me {
-  position: relative;
-  width: 28px;
-  height: 28px;
-  cursor: pointer;
-}
-
-.ut-me__dot {
-  position: absolute;
-  inset: 6px;
-  border: 3px solid #ffffff;
-  border-radius: 50%;
-  background: #2f7d57;
-  box-shadow: 0 4px 12px rgba(47, 125, 87, 0.5);
-  transition: transform 0.2s ease;
-}
-
-.ut-me:hover .ut-me__dot {
-  transform: scale(1.15);
-}
-
-.ut-me__pulse {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: rgba(47, 125, 87, 0.35);
-  animation: ut-pulse 2s ease-out infinite;
-}
-
-.ut-start {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 4px 12px rgba(40, 35, 20, 0.25);
-  cursor: grab;
-  animation: ut-pop 0.45s cubic-bezier(0.34, 1.6, 0.5, 1) backwards;
-}
-
-.ut-start span {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #2f7d57;
-}
-
-.ut-pin {
-  position: relative;
-  width: 36px;
-  height: 46px;
-  cursor: grab;
-  animation: ut-drop 0.6s cubic-bezier(0.34, 1.4, 0.5, 1) backwards;
-}
-
-.ut-pin svg {
-  position: relative;
-  z-index: 1;
-  width: 36px;
-  height: 46px;
-  filter: drop-shadow(0 6px 10px rgba(40, 35, 20, 0.3));
-}
-
-.ut-pin path {
-  fill: #2b2b26;
-}
-
-.ut-pin circle {
-  fill: #fbf7ee;
-}
-
-.ut-pin__shadow {
-  position: absolute;
-  left: 50%;
-  bottom: -3px;
-  width: 16px;
-  height: 6px;
-  border-radius: 50%;
-  background: rgba(40, 35, 20, 0.25);
-  transform: translateX(-50%);
-  animation: ut-shadow 0.6s ease backwards;
-}
-
-.leaflet-dragging .ut-pin,
-.leaflet-dragging .ut-start {
-  cursor: grabbing;
-}
-
-.ut-route {
-  animation: ut-dash 0.9s linear infinite;
-}
-
-.leaflet-container {
-  background: #eef0e8;
-  font-family: inherit;
-}
-
-.leaflet-tile-pane {
-  filter: saturate(0.7) sepia(0.12) brightness(1.03) contrast(0.96);
-}
-
-.leaflet-control-attribution {
-  margin: 0 8px 8px 0 !important;
-  padding: 2px 8px !important;
-  border-radius: 8px;
-  background: rgba(255, 253, 248, 0.8) !important;
-  font-size: 10.5px;
-  color: #8a8578;
-}
-
-.leaflet-control-attribution a {
-  color: #2f7d57;
-}
-
-@keyframes ut-pulse {
-  from {
-    opacity: 1;
-    transform: scale(0.6);
-  }
-  to {
-    opacity: 0;
-    transform: scale(2.2);
-  }
-}
-
-@keyframes ut-pop {
-  from {
-    opacity: 0;
-    transform: scale(0.3);
-  }
-}
-
-@keyframes ut-drop {
-  0% {
-    opacity: 0;
-    transform: translateY(-40px);
-  }
-  60% {
-    opacity: 1;
-    transform: translateY(3px);
-  }
-  100% {
-    transform: translateY(0);
-  }
-}
-
-@keyframes ut-shadow {
-  from {
-    opacity: 0;
-    transform: translateX(-50%) scale(0.3);
-  }
-}
-
-@keyframes ut-dash {
-  to {
-    stroke-dashoffset: -12;
-  }
-}
-
-@media (max-width: 720px) {
-  .leaflet-control-attribution {
-    margin-bottom: calc(76px + env(safe-area-inset-bottom)) !important;
-  }
-}
-</style>

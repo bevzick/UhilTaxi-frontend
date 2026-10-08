@@ -83,6 +83,15 @@ function writeStorage(value: Session | null) {
   }
 }
 
+export type Role = 'client' | 'driver' | 'admin'
+
+export function normalizeRole(value: string | null | undefined): Role {
+  const role = (value ?? '').toLowerCase()
+  if (role.includes('driver')) return 'driver'
+  if (role.includes('admin')) return 'admin'
+  return 'client'
+}
+
 const session = ref<Session | null>(readStorage())
 
 if (typeof window !== 'undefined') {
@@ -115,6 +124,8 @@ function applySession(response: AuthResponse | null): boolean {
 export function useAuth() {
   const token = computed(() => session.value?.token ?? null)
   const user = computed(() => session.value?.user ?? null)
+  const role = computed(() => normalizeRole(user.value?.role))
+  const isDriver = computed(() => role.value === 'driver')
   const isAuthenticated = computed(
     () => !!session.value && (session.value.expiresAt === null || session.value.expiresAt > Date.now()),
   )
@@ -133,5 +144,5 @@ export function useAuth() {
     writeStorage(null)
   }
 
-  return { token, user, isAuthenticated, login, register, logout }
+  return { token, user, role, isDriver, isAuthenticated, login, register, logout }
 }
