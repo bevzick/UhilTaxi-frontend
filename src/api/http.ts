@@ -1,4 +1,21 @@
-const BASE_URL = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
+import { safeMessage } from '../utils/validation'
+
+const TIMEOUT_MS = 15_000
+const MAX_RESPONSE_BYTES = 1_000_000
+
+function resolveBaseUrl(raw: string | undefined) {
+  try {
+    const url = new URL(raw ?? '')
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') throw new Error('protocol')
+    if (import.meta.env.PROD && url.protocol !== 'https:') throw new Error('insecure')
+    return url.origin + url.pathname.replace(/\/+$/, '')
+  } catch {
+    console.error('VITE_API_URL має бути коректною адресою http(s)')
+    return ''
+  }
+}
+
+const BASE_URL = resolveBaseUrl(import.meta.env.VITE_API_URL)
 
 export class ApiError extends Error {
   status: number
@@ -19,62 +36,101 @@ interface RequestOptions {
   signal?: AbortSignal
 }
 
-function extractMessage(data: unknown, status: number): string {
-  if (typeof data === 'string' && data.trim()) return data
+const GENERIC = 'Щось пішло не так. Спробуйте ще раз'
 
-  if (data && typeof data === 'object') {
-    const record = data as Record<string, unknown>
+function serverMessage(data: unknown): string | null {
+  if (!data || typeof data !== 'object') return safeMessage(data)
+  const record = data as Record<string, unknown>
 
-    if (record.errors && typeof record.errors === 'object') {
-      const first = (Object.values(record.errors as Record<string, unknown>) as unknown[]).flat()[0]
-      if (typeof first === 'string') return first
-    }
-
-    for (const key of ['message', 'detail', 'title', 'error']) {
-      const value = record[key]
-      if (typeof value === 'string' && value) return value
+  if (record.errors && typeof record.errors === 'object') {
+    for (const value of Object.values(record.errors as Record<string, unknown>)) {
+      const first = Array.isArray(value) ? value[0] : value
+      const message = safeMessage(first)
+      if (message) return message
     }
   }
 
+  for (const key of ['message', 'detail', 'title', 'error']) {
+    const message = safeMessage(record[key])
+    if (message) return message
+  }
+
+  return null
+}
+
+function errorMessage(data: unknown, status: number) {
   if (status === 401) return 'Невірний телефон або пароль'
-  if (status === 409) return 'Користувач з такими даними вже існує'
+  if (status === 403) return 'Доступ заборонено'
+  if (status === 429) return 'Забагато спроб. Спробуйте трохи пізніше'
   if (status >= 500) return 'Сервер тимчасово недоступний. Спробуйте пізніше'
-  return 'Щось пішло не так. Спробуйте ще раз'
+  if (status === 409) return serverMessage(data) ?? 'Користувач з такими даними вже існує'
+  return serverMessage(data) ?? GENERIC
+}
+
+function isSafePath(path: string) {
+  return path.startsWith('/') && !path.startsWith('//') && !path.includes('..') && !/[\s\\]/.test(path)
 }
 
 export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { method = 'GET', body, token, signal } = options
-  const headers: Record<string, string> = { Accept: 'application/json' }
 
+  if (!BASE_URL || !isSafePath(path)) throw new ApiError('Невірна конфігурація API', 0)
+
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), TIMEOUT_MS)
+  const onAbort = () => controller.abort()
+  signal?.addEventListener('abort', onAbort, { once: true })
+
+  const headers: Record<string, string> = { Accept: 'application/json' }
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (token) headers.Authorization = `Bearer ${token}`
 
-  let response: Response
-
   try {
-    response = await fetch(`${BASE_URL}${path}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-      signal,
-    })
-  } catch (error) {
-    if (error instanceof DOMException && error.name === 'AbortError') throw error
-    throw new ApiError("Немає з'єднання з сервером", 0)
-  }
+    let response: Response
 
-  const text = await response.text()
-  let data: unknown = null
-
-  if (text) {
     try {
-      data = JSON.parse(text)
-    } catch {
-      data = text
+      response = await fetch(`${BASE_URL}${path}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+        mode: 'cors',
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'error',
+        referrerPolicy: 'no-referrer',
+      })
+    } catch (error) {
+      if (signal?.aborted) throw error
+      if (controller.signal.aborted) throw new ApiError('Сервер не відповідає. Спробуйте ще раз', 0)
+      throw new ApiError("Немає з'єднання з сервером", 0)
     }
+
+    const declared = Number(response.headers.get('content-length') ?? 0)
+    if (declared > MAX_RESPONSE_BYTES) throw new ApiError(GENERIC, response.status)
+
+    const text = await response.text()
+    if (text.length > MAX_RESPONSE_BYTES) throw new ApiError(GENERIC, response.status)
+
+    let data: unknown = null
+    if (text) {
+      const type = response.headers.get('content-type') ?? ''
+      if (type.includes('json')) {
+        try {
+          data = JSON.parse(text)
+        } catch {
+          data = null
+        }
+      } else {
+        data = text
+      }
+    }
+
+    if (!response.ok) throw new ApiError(errorMessage(data, response.status), response.status, data)
+
+    return data as T
+  } finally {
+    clearTimeout(timeout)
+    signal?.removeEventListener('abort', onAbort)
   }
-
-  if (!response.ok) throw new ApiError(extractMessage(data, response.status), response.status, data)
-
-  return data as T
 }

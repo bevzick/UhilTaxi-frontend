@@ -7,12 +7,25 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# Dependencies
 node_modules
-.DS_Store
+
+# Build
 dist
 dist-ssr
 coverage
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
 *.local
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
 
 # Editor directories and files
 .vscode/*
@@ -24,8 +37,7 @@ coverage
 *.sln
 *.sw?
 
-*.tsbuildinfo
-
+# Lint
 .eslintcache
 
 # Cypress
@@ -38,5 +50,8 @@ __screenshots__/
 # Vite
 *.timestamp-*-*.mjs
 
+# Playwright
 test-results/
 playwright-report/
+blob-report/
+playwright/.cache/

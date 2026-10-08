@@ -3,9 +3,29 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 import { ApiError } from '@/api/http'
 import { useAuth } from '@/composables/useAuth'
+import {
+  LIMITS,
+  filterPhoneInput,
+  normalizeEmail,
+  normalizeName,
+  normalizePhone,
+  passwordChecks,
+  safeRedirect,
+  validateBirthDate,
+  validateEmail,
+  validateName,
+  validatePassword,
+  validatePhone,
+  type ValidationResult,
+} from '@/utils/validation'
 
 type Mode = 'login' | 'register'
 type FieldKey = 'first_name' | 'last_name' | 'phone' | 'email' | 'password' | 'birth_date'
+type PhoneTarget = 'login' | 'register'
+
+const MAX_FAILS = 5
+const LOCK_BASE_MS = 30_000
+const MIN_INTERVAL_MS = 800
 
 const route = useRoute()
 const router = useRouter()
@@ -21,7 +41,14 @@ const intro = ref(true)
 const error = ref('')
 const notice = ref('')
 const showPassword = ref(false)
+const passwordFocused = ref(false)
 const errors = reactive<Partial<Record<FieldKey, string>>>({})
+
+const fails = ref(0)
+const lockUntil = ref(0)
+const now = ref(Date.now())
+let lastSubmit = 0
+let lockTimer = 0
 
 const loginForm = reactive({ phone: '', password: '' })
 const registerForm = reactive({
@@ -33,8 +60,12 @@ const registerForm = reactive({
   birth_date: '',
 })
 
-const redirectTo = computed(() => (typeof route.query.redirect === 'string' ? route.query.redirect : '/'))
+const redirectTo = computed(() => safeRedirect(route.query.redirect))
 const today = new Date().toISOString().slice(0, 10)
+const checks = computed(() => passwordChecks(registerForm.password))
+const showChecks = computed(() => passwordFocused.value || registerForm.password.length > 0)
+const lockSeconds = computed(() => Math.max(0, Math.ceil((lockUntil.value - now.value) / 1000)))
+const locked = computed(() => lockSeconds.value > 0)
 
 const copy = computed(() =>
   mode.value === 'login'
@@ -47,7 +78,12 @@ const later = (fn: () => void, ms: number) => timers.push(window.setTimeout(fn, 
 const wait = (ms: number) => new Promise<void>((resolve) => later(resolve, ms))
 
 onMounted(() => later(() => (intro.value = false), 1400))
-onBeforeUnmount(() => timers.forEach((t) => clearTimeout(t)))
+onBeforeUnmount(() => {
+  timers.forEach((t) => clearTimeout(t))
+  clearInterval(lockTimer)
+  loginForm.password = ''
+  registerForm.password = ''
+})
 
 watch(
   () => route.query.mode,
@@ -55,6 +91,17 @@ watch(
     mode.value = toMode(value)
   },
 )
+
+function startLock() {
+  const steps = fails.value - MAX_FAILS
+  lockUntil.value = Date.now() + LOCK_BASE_MS * 2 ** Math.min(steps, 4)
+  now.value = Date.now()
+  clearInterval(lockTimer)
+  lockTimer = window.setInterval(() => {
+    now.value = Date.now()
+    if (now.value >= lockUntil.value) clearInterval(lockTimer)
+  }, 1000)
+}
 
 function resetMessages() {
   error.value = ''
@@ -66,6 +113,8 @@ function setMode(next: Mode) {
   if (next === mode.value || loading.value) return
   resetMessages()
   showPassword.value = false
+  loginForm.password = ''
+  registerForm.password = ''
   mode.value = next
   router.replace({ query: { ...route.query, mode: next } })
 }
@@ -73,6 +122,16 @@ function setMode(next: Mode) {
 function clearError(key: FieldKey) {
   if (errors[key]) delete errors[key]
   if (error.value) error.value = ''
+}
+
+function onPhoneInput(target: PhoneTarget) {
+  const form = target === 'login' ? loginForm : registerForm
+  form.phone = filterPhoneInput(form.phone)
+  clearError('phone')
+}
+
+function tidy(key: 'first_name' | 'last_name' | 'email') {
+  registerForm[key] = key === 'email' ? normalizeEmail(registerForm[key]) : normalizeName(registerForm[key])
 }
 
 function shake() {
@@ -83,40 +142,41 @@ function shake() {
   })
 }
 
-const normalizePhone = (value: string) => value.replace(/[\s()-]/g, '')
-const isEmail = (value: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
-const isPhone = (value: string) => normalizePhone(value).replace(/\D/g, '').length >= 10
-
 function validate() {
   resetMessages()
-  const required = (key: FieldKey, value: string) => {
-    if (!value.trim()) errors[key] = 'Заповніть це поле'
-  }
+  const rules: [FieldKey, ValidationResult][] =
+    mode.value === 'login'
+      ? [
+          ['phone', validatePhone(loginForm.phone)],
+          ['password', validatePassword(loginForm.password, false)],
+        ]
+      : [
+          ['first_name', validateName(registerForm.first_name)],
+          ['last_name', validateName(registerForm.last_name)],
+          ['phone', validatePhone(registerForm.phone)],
+          ['email', validateEmail(registerForm.email)],
+          ['birth_date', validateBirthDate(registerForm.birth_date)],
+          ['password', validatePassword(registerForm.password, true)],
+        ]
 
-  if (mode.value === 'login') {
-    required('phone', loginForm.phone)
-    required('password', loginForm.password)
-    if (loginForm.phone.trim() && !isPhone(loginForm.phone)) errors.phone = 'Некоректний номер телефону'
-  } else {
-    required('first_name', registerForm.first_name)
-    required('last_name', registerForm.last_name)
-    required('phone', registerForm.phone)
-    required('password', registerForm.password)
-    if (registerForm.phone.trim() && !isPhone(registerForm.phone)) errors.phone = 'Некоректний номер телефону'
-    if (registerForm.email.trim() && !isEmail(registerForm.email.trim())) errors.email = 'Некоректний email'
-  }
-
+  for (const [key, message] of rules) if (message) errors[key] = message
   return Object.keys(errors).length === 0
 }
 
 async function finish() {
+  fails.value = 0
+  loginForm.password = ''
+  registerForm.password = ''
   success.value = true
   await wait(650)
-  await router.push(redirectTo.value)
+  await router.replace(redirectTo.value)
 }
 
 async function submit() {
-  if (loading.value || success.value) return
+  if (loading.value || success.value || locked.value) return
+  if (Date.now() - lastSubmit < MIN_INTERVAL_MS) return
+  lastSubmit = Date.now()
+
   if (!validate()) {
     shake()
     return
@@ -133,10 +193,10 @@ async function submit() {
     }
 
     const signedIn = await register({
-      first_name: registerForm.first_name.trim(),
-      last_name: registerForm.last_name.trim(),
+      first_name: normalizeName(registerForm.first_name),
+      last_name: normalizeName(registerForm.last_name),
       phone: normalizePhone(registerForm.phone),
-      email: registerForm.email.trim() || null,
+      email: normalizeEmail(registerForm.email) || null,
       password: registerForm.password,
       birth_date: registerForm.birth_date || null,
     })
@@ -146,13 +206,21 @@ async function submit() {
     if (signedIn) {
       await finish()
     } else {
-      loginForm.phone = registerForm.phone
+      const phone = registerForm.phone
       setMode('login')
+      loginForm.phone = phone
       notice.value = 'Акаунт створено! Тепер увійдіть'
     }
   } catch (e) {
     loading.value = false
     error.value = e instanceof ApiError ? e.message : 'Щось пішло не так. Спробуйте ще раз'
+
+    if (e instanceof ApiError && (e.status === 401 || e.status === 429)) {
+      fails.value++
+      loginForm.password = ''
+      if (fails.value >= MAX_FAILS || e.status === 429) startLock()
+    }
+
     shake()
   }
 }
@@ -278,11 +346,13 @@ async function submit() {
                   <input
                     v-model="loginForm.phone"
                     class="field__input"
+                    name="phone"
                     type="tel"
                     inputmode="tel"
                     autocomplete="tel"
                     placeholder="+380 00 000 00 00"
-                    @input="clearError('phone')"
+                    :maxlength="LIMITS.phoneMax"
+                    @input="onPhoneInput('login')"
                   />
                   <Transition name="err">
                     <span v-if="errors.phone" class="field__error">{{ errors.phone }}</span>
@@ -295,6 +365,10 @@ async function submit() {
                     <input
                       v-model="loginForm.password"
                       class="field__input"
+                      name="password"
+                      :maxlength="LIMITS.passwordMax"
+                      autocapitalize="off"
+                      spellcheck="false"
                       :type="showPassword ? 'text' : 'password'"
                       autocomplete="current-password"
                       placeholder="Ваш пароль"
@@ -327,8 +401,13 @@ async function submit() {
                     <input
                       v-model="registerForm.first_name"
                       class="field__input"
+                      name="first_name"
                       type="text"
                       autocomplete="given-name"
+                      autocapitalize="words"
+                      spellcheck="false"
+                      :maxlength="LIMITS.nameMax"
+                      @blur="tidy('first_name')"
                       placeholder="Олександр"
                       @input="clearError('first_name')"
                     />
@@ -342,8 +421,13 @@ async function submit() {
                     <input
                       v-model="registerForm.last_name"
                       class="field__input"
+                      name="last_name"
                       type="text"
                       autocomplete="family-name"
+                      autocapitalize="words"
+                      spellcheck="false"
+                      :maxlength="LIMITS.nameMax"
+                      @blur="tidy('last_name')"
                       placeholder="Коваленко"
                       @input="clearError('last_name')"
                     />
@@ -358,11 +442,13 @@ async function submit() {
                   <input
                     v-model="registerForm.phone"
                     class="field__input"
+                    name="phone"
                     type="tel"
                     inputmode="tel"
                     autocomplete="tel"
                     placeholder="+380 00 000 00 00"
-                    @input="clearError('phone')"
+                    :maxlength="LIMITS.phoneMax"
+                    @input="onPhoneInput('register')"
                   />
                   <Transition name="err">
                     <span v-if="errors.phone" class="field__error">{{ errors.phone }}</span>
@@ -375,7 +461,12 @@ async function submit() {
                     <input
                       v-model="registerForm.email"
                       class="field__input"
+                      name="email"
                       type="email"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      :maxlength="LIMITS.emailMax"
+                      @blur="tidy('email')"
                       inputmode="email"
                       autocomplete="email"
                       placeholder="name@mail.com"
@@ -386,16 +477,22 @@ async function submit() {
                     </Transition>
                   </label>
 
-                  <label class="field stagger" style="--i: 6">
+                  <label class="field stagger" style="--i: 6" :class="{ 'field--error': errors.birth_date }">
                     <span class="field__label">Дата народження <em>необов'язково</em></span>
                     <input
                       v-model="registerForm.birth_date"
                       class="field__input field__input--date"
                       :class="{ 'field__input--empty': !registerForm.birth_date }"
+                      name="birth_date"
                       type="date"
+                      min="1900-01-01"
                       :max="today"
                       autocomplete="bday"
+                      @input="clearError('birth_date')"
                     />
+                    <Transition name="err">
+                      <span v-if="errors.birth_date" class="field__error">{{ errors.birth_date }}</span>
+                    </Transition>
                   </label>
                 </div>
 
@@ -405,6 +502,12 @@ async function submit() {
                     <input
                       v-model="registerForm.password"
                       class="field__input"
+                      name="new-password"
+                      :maxlength="LIMITS.passwordMax"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      @focus="passwordFocused = true"
+                      @blur="passwordFocused = false"
                       :type="showPassword ? 'text' : 'password'"
                       autocomplete="new-password"
                       placeholder="Придумайте пароль"
@@ -427,6 +530,15 @@ async function submit() {
                   <Transition name="err">
                     <span v-if="errors.password" class="field__error">{{ errors.password }}</span>
                   </Transition>
+                  <Transition name="err">
+                    <ul v-if="showChecks" class="checks" aria-live="polite">
+                      <li class="checks__item" :class="{ 'checks__item--ok': checks.length }">
+                        Від {{ LIMITS.passwordMin }} символів
+                      </li>
+                      <li class="checks__item" :class="{ 'checks__item--ok': checks.letter }">Літера</li>
+                      <li class="checks__item" :class="{ 'checks__item--ok': checks.digit }">Цифра</li>
+                    </ul>
+                  </Transition>
                 </label>
               </div>
             </div>
@@ -441,7 +553,7 @@ async function submit() {
             type="submit"
             class="submit"
             :class="{ 'submit--loading': loading, 'submit--success': success }"
-            :disabled="loading || success"
+            :disabled="loading || success || locked"
           >
             <span class="submit__shine"></span>
             <Transition name="label" mode="out-in">
@@ -449,6 +561,9 @@ async function submit() {
                 <svg class="submit__check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M5 12.5l4.5 4.5L19 7.5" pathLength="1" />
                 </svg>
+              </span>
+              <span v-else-if="locked" key="locked" class="submit__content">
+                Спробуйте через {{ lockSeconds }} с
               </span>
               <span v-else-if="loading" key="loading" class="submit__content">
                 <span class="submit__spinner"></span>
@@ -952,6 +1067,59 @@ async function submit() {
 
 .submit:disabled {
   cursor: progress;
+}
+
+.submit--locked,
+.submit:disabled:not(.submit--loading):not(.submit--success) {
+  background: #8a9e92;
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 2px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.checks__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: #f1ebdd;
+  color: #8a8578;
+  font-size: 12.5px;
+  font-weight: 500;
+  transition:
+    background-color 0.25s ease,
+    color 0.25s ease;
+}
+
+.checks__item::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+  transition:
+    transform 0.25s var(--ease-out),
+    opacity 0.25s ease;
+}
+
+.checks__item--ok {
+  background: #e3efe7;
+  color: #2f7d57;
+}
+
+.checks__item--ok::before {
+  opacity: 1;
+  transform: scale(1.3);
 }
 
 .submit--success {
